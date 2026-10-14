@@ -1,0 +1,22 @@
+# Build output
+.build/
+dist/
+
+# Generated from assets/fan-asset.jpg by scripts/build-app.sh
+Resources/
+
+# macOS
+.DS_Store
+
+# Local-only agent instructions and internal notes. Never commit, push or
+# publish these — see AGENTS.md.
+AGENTS.md
+.docs-internal/
+
+# The reusable instruction set this project was set up from is local-only too.
+principles/
+/docs/principles/
+
+# Xcode user state and local tool state
+.swiftpm/
+.freebuff/

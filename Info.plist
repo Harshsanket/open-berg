@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>OpenBerg</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.openberg.AtombergFan</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>OpenBerg</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenBerg</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>27.0</string>
+	<!-- Menu bar only: no Dock icon and no application menu. -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- Required before macOS will let the app listen on the LAN for fan
+	     beacons on UDP 5625 (opt-in local control). -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OpenBerg listens for your fan's broadcast packets so it can control it over your local network without using cloud API calls.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Unofficial client for the Atomberg Home public API. Not affiliated with Atomberg Technologies.</string>
+	<key>NSSupportsSuddenTermination</key>
+	<true/>
+</dict>
+</plist>
