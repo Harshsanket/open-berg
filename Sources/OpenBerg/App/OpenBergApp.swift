@@ -29,8 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = PanelController(model: model)
         panels = controller
 
-        Task {
-            await model.bootstrap()
+        Task { @MainActor in
+            model.bootstrap()
             // Fresh install: open Setup straight away rather than leaving an
             // empty panel with no obvious way to add credentials.
             controller.showSetupIfUnconfigured()

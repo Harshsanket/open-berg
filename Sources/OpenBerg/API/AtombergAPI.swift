@@ -10,32 +10,20 @@ import Foundation
 ///
 /// `POST /get_lock_dynamic_pin` belongs to smart locks, so it is deliberately
 /// not implemented here.
+///
+/// Every request is single-shot: a failed attempt still counts against the
+/// daily quota, so nothing is ever retried automatically.
 struct AtombergAPI: Sendable {
-    enum Environment: String, CaseIterable, Identifiable, Sendable {
-        case production
-        case development
+    /// There is one backend and no environment switch.
+    static let baseURL = URL(string: "https://api.developer.atomberg-iot.com/v2")!
 
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .production: return "Production"
-            case .development: return "Development"
-            }
-        }
-
-        var baseURL: URL {
-            switch self {
-            case .production:
-                return URL(string: "https://api.developer.atomberg-iot.com/v2")!
-            case .development:
-                return URL(string: "https://6yrk5x4p32.execute-ap-south-1.amazonaws.com/dev")!
-            }
-        }
-    }
-
-    let environment: Environment
     let apiKey: String
+
+    /// Invoked once per request, right before it is sent. A transport failure
+    /// is a real request against the daily quota, so the count lives at the
+    /// transport rather than at each call site. Defaults to doing nothing;
+    /// `AppModel` injects the tally.
+    var recordCall: @Sendable () -> Void = {}
 
     // MARK: Requests
 
@@ -107,7 +95,7 @@ struct AtombergAPI: Sendable {
             throw AtombergError(status: 0, message: "No API key saved yet.")
         }
         var components = URLComponents(
-            url: environment.baseURL.appendingPathComponent(path),
+            url: Self.baseURL.appendingPathComponent(path),
             resolvingAgainstBaseURL: false
         )!
         if !query.isEmpty { components.queryItems = query }
@@ -118,7 +106,7 @@ struct AtombergAPI: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = jsonBody
-        request.timeoutInterval = 35
+        request.timeoutInterval = 5
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
@@ -126,65 +114,35 @@ struct AtombergAPI: Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        var attempt = 0
-        while true {
-            attempt += 1
+        recordCall()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            // Transport failure (offline, DNS, timeout). Still a call spent.
+            throw AtombergError(status: 0, message: error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw AtombergError(status: 0, message: "Unexpected response from the server.")
+        }
+
+        if (200...299).contains(http.statusCode) {
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    throw AtombergError(status: 0, message: "Unexpected response from the server.")
-                }
-
-                if (200...299).contains(http.statusCode) {
-                    do {
-                        let envelope = try JSONDecoder().decode(Envelope<Payload>.self, from: data)
-                        return envelope.message
-                    } catch {
-                        throw AtombergError(
-                            status: http.statusCode,
-                            message: "Could not read the response: \(error.localizedDescription)"
-                        )
-                    }
-                }
-
-                let described = (try? JSONDecoder().decode(FailureEnvelope.self, from: data))?.message
-                let error = AtombergError(
-                    status: http.statusCode,
-                    message: described ?? "HTTP \(http.statusCode)"
-                )
-                if attempt < Self.maxAttempts, AtombergError.isRetryable(http.statusCode) {
-                    try await Self.backoff(attempt: attempt, response: http)
-                    continue
-                }
-                throw error
-            } catch let error as AtombergError {
-                throw error
+                let envelope = try JSONDecoder().decode(Envelope<Payload>.self, from: data)
+                return envelope.message
             } catch {
-                // Transport failure (offline, DNS, timeout).
-                let wrapped = AtombergError(
-                    status: 0,
-                    message: error.localizedDescription
+                throw AtombergError(
+                    status: http.statusCode,
+                    message: "Could not read the response: \(error.localizedDescription)"
                 )
-                if attempt < Self.maxAttempts {
-                    try await Self.backoff(attempt: attempt, response: nil)
-                    continue
-                }
-                throw wrapped
             }
         }
-    }
 
-    private static let maxAttempts = 3
-
-    /// Only 429/500/502/503/504 are retried, and never faster than the
-    /// documented 5 requests/second ceiling.
-    private static func backoff(attempt: Int, response: HTTPURLResponse?) async throws {
-        if let header = response?.value(forHTTPHeaderField: "Retry-After"),
-           let seconds = Double(header), seconds > 0 {
-            try await Task.sleep(for: .seconds(min(seconds, 10)))
-            return
-        }
-        let base = attempt == 1 ? 0.6 : 1.8
-        try await Task.sleep(for: .seconds(base))
+        let described = (try? JSONDecoder().decode(FailureEnvelope.self, from: data))?.message
+        throw AtombergError(
+            status: http.statusCode,
+            message: described ?? "HTTP \(http.statusCode)"
+        )
     }
 }

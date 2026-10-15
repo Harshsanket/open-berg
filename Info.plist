@@ -17,11 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
@@ -34,7 +32,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OpenBerg listens for your fan's broadcast packets so it can control it over your local network without using cloud API calls.</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Unofficial client for the Atomberg Home public API. Not affiliated with Atomberg Technologies.</string>
+	<string>OpenBerg, an independent, MIT-licensed client for the Atomberg Home public API. Not affiliated with Atomberg Technologies.</string>
 	<key>NSSupportsSuddenTermination</key>
 	<true/>
 </dict>

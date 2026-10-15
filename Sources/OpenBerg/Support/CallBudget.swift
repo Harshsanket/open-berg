@@ -3,9 +3,12 @@ import Foundation
 /// The free plan allows 100 calls per day and 5 per second, and failed calls
 /// count too. This keeps a local tally so the UI can show what is left before
 /// the quota is hit.
-/// Not `Sendable`: it wraps `UserDefaults` and is only touched from the main
-/// actor, where the model already lives.
-struct CallBudget {
+///
+/// Incremented from the URLSession layer (which runs off the main actor) and
+/// read by the UI on the main actor, so every access is serialised behind one
+/// lock — a read-modify-write that races would silently under-count a quota
+/// that cannot be overspent safely.
+final class CallBudget: @unchecked Sendable {
     static let dailyLimit = 100
 
     private enum Key {
@@ -14,6 +17,7 @@ struct CallBudget {
     }
 
     private let defaults: UserDefaults
+    private let lock = NSLock()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -27,7 +31,8 @@ struct CallBudget {
         return formatter.string(from: Date())
     }
 
-    private func rollOverIfNeeded() {
+    /// Callers must hold `lock`.
+    private func rollOverIfNeededLocked() {
         if defaults.string(forKey: Key.day) != Self.today {
             defaults.set(Self.today, forKey: Key.day)
             defaults.set(0, forKey: Key.count)
@@ -36,21 +41,18 @@ struct CallBudget {
 
     /// Calls already spent today (UTC, matching the quota reset).
     var usedToday: Int {
-        rollOverIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        rollOverIfNeededLocked()
         return defaults.integer(forKey: Key.count)
     }
 
-    var remainingToday: Int { max(0, Self.dailyLimit - usedToday) }
-
+    /// One attempt actually put on the wire: retries and transport failures
+    /// count, exactly like the server counts them.
     func record() {
-        rollOverIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        rollOverIfNeededLocked()
         defaults.set(defaults.integer(forKey: Key.count) + 1, forKey: Key.count)
-    }
-
-    /// Rough cost of polling at `interval` seconds, shown next to the setting so
-    /// the trade-off is visible before it is chosen.
-    static func dailyCost(forInterval seconds: Int) -> Int {
-        guard seconds > 0 else { return 0 }
-        return Int((86_400.0 / Double(seconds)).rounded())
     }
 }

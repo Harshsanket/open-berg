@@ -4,18 +4,22 @@ import SwiftUI
 ///
 /// The look follows the dark card-based control app it was remodelled on: a
 /// deep navy backdrop, glassy raised surfaces, blue accent glows when
-/// something is active, and warm orange for the light. Colours are fixed, not
-/// derived from `Color.primary`, so the panel reads the same in light and dark
-/// appearances.
+/// something is active, and warm orange for the light. The app is dark-only —
+/// each window pins `darkAqua` once — and every colour is fixed, never
+/// derived from `Color.primary`.
 enum Palette {
-    /// The panel backdrop — deep navy, nearly black.
-    static let background = Color(red: 0.04, green: 0.06, blue: 0.11)
-    /// A slightly lighter navy for raised cards.
-    static let card = Color(red: 0.09, green: 0.12, blue: 0.19)
+    /// The panel backdrop — neutral near-black.
+    static let background = Color(red: 0.07, green: 0.07, blue: 0.08)
     /// The fan itself — the electric blue the reference tiles glow with.
     static let fan = Color(red: 0.25, green: 0.55, blue: 1.0)
+    /// Brighter accent for tinted-only glyphs that carry no fill.
+    static let fanBright = Color(red: 0.40, green: 0.70, blue: 1.0)
     /// The light on the fan.
     static let light = Color(red: 1.0, green: 0.62, blue: 0.20)
+    /// Vivid orange — the runtime stat.
+    static let orange = Color(red: 1.0, green: 0.58, blue: 0.0)
+    /// Green — the energy stat.
+    static let green = Color(red: 0.20, green: 0.80, blue: 0.38)
     /// Idle or unreachable.
     static let idle = Color(red: 0.45, green: 0.48, blue: 0.55)
     /// Primary text.
@@ -33,41 +37,38 @@ enum Palette {
 private struct CardSurface: ViewModifier {
     var radius: CGFloat
     var padding: CGFloat
-    var highlighted: Bool
     var tint: Color
 
     func body(content: Content) -> some View {
         content
             .padding(padding)
             .background {
+                // Opaque near-black base under a light tint wash, so every
+                // surface reads the same colour whatever sits behind it.
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(highlighted ? tint.opacity(0.14) : Palette.card.opacity(0.85))
+                    .fill(Palette.background)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .fill(tint.opacity(0.10))
+                    }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        highlighted ? tint.opacity(0.55) : Palette.stroke,
-                        lineWidth: highlighted ? 1.2 : 1
-                    )
+                    .strokeBorder(tint.opacity(0.25), lineWidth: 1)
             }
-            .shadow(
-                color: highlighted ? tint.opacity(0.55) : .black.opacity(0.25),
-                radius: highlighted ? 14 : 6,
-                y: 2
-            )
+            .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
     }
 }
 
 extension View {
-    /// One raised surface. `highlighted` paints it in `tint` with a glow,
-    /// which is how an active control announces itself.
+    /// One raised surface. Every card shares the same opaque base, so the
+    /// panel looks identical over any desktop.
     func card(
         radius: CGFloat = 16,
         padding: CGFloat = 14,
-        highlighted: Bool = false,
         tint: Color = Palette.fan
     ) -> some View {
-        modifier(CardSurface(radius: radius, padding: padding, highlighted: highlighted, tint: tint))
+        modifier(CardSurface(radius: radius, padding: padding, tint: tint))
     }
 }
 
@@ -75,7 +76,6 @@ extension View {
 
 struct SectionLabel: View {
     let text: String
-    var trailing: String?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -84,11 +84,6 @@ struct SectionLabel: View {
                 .tracking(0.8)
                 .foregroundStyle(Palette.textTertiary)
             Spacer(minLength: 0)
-            if let trailing {
-                Text(trailing)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Palette.textTertiary)
-            }
         }
     }
 }
@@ -140,6 +135,9 @@ struct CircleButton: View {
     var tint: Color = Palette.fan
     var filled: Bool = false
     var glow: Bool = false
+    /// Give the resting state a tinted disc instead of staying transparent —
+    /// used for the steppers inside cards, where a bare outline disappears.
+    var tinted: Bool = false
     var enabled: Bool = true
     let action: () -> Void
 
@@ -149,10 +147,19 @@ struct CircleButton: View {
                 .font(.system(size: size * 0.40, weight: .semibold))
                 .frame(width: size, height: size)
                 .background {
-                    Circle().fill(filled ? tint : Color.white.opacity(0.07))
+                    // Solid accent at full opacity when on; a light tint at
+                    // rest for in-card steppers, transparent for the header.
+                    Circle().fill(
+                        filled ? tint : (tinted ? tint.opacity(0.18) : Color.clear)
+                    )
                 }
                 .overlay {
-                    Circle().strokeBorder(Color.white.opacity(filled ? 0 : 0.10), lineWidth: 1)
+                    Circle().strokeBorder(
+                        filled
+                            ? Color.clear
+                            : (tinted ? tint.opacity(0.30) : Color.white.opacity(0.12)),
+                        lineWidth: 1
+                    )
                 }
                 .foregroundStyle(filled ? Color.white : Palette.text)
                 .shadow(color: filled && glow ? tint.opacity(0.6) : .clear, radius: 12, y: 2)
@@ -181,39 +188,59 @@ struct QuickTile: View {
                 HStack {
                     Image(systemName: icon)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(active ? tint : Palette.textSecondary)
+                        .foregroundStyle(active ? Color.white : Palette.textSecondary)
                     Spacer(minLength: 0)
-                    if active {
-                        Circle()
-                            .fill(tint)
-                            .frame(width: 5, height: 5)
-                            .shadow(color: tint, radius: 3)
-                    }
                 }
                 Spacer(minLength: 6)
                 Text(title)
                     .font(.system(size: 10))
-                    .foregroundStyle(Palette.textSecondary)
+                    .foregroundStyle(active ? Color.white.opacity(0.8) : Palette.textSecondary)
                     .lineLimit(1)
                 Text(value)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.text)
+                    .foregroundStyle(active ? Color.white : Palette.text)
                     .lineLimit(1)
             }
+            // Only the content dims when disabled — the surface itself is
+            // added below, after this opacity, so it stays the full navy.
+            .opacity(enabled ? 1 : 0.45)
             .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
-            .card(radius: 15, padding: 11, highlighted: active, tint: tint)
+            .padding(11)
+            .background {
+                // Same recipe as every card: opaque near-black base under a
+                // light tint wash, solid accent when on.
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Palette.background)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .fill(active ? tint : tint.opacity(0.10))
+                    }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(
+                        active ? Color.clear : tint.opacity(0.25),
+                        lineWidth: 1
+                    )
+            }
+            .shadow(
+                color: active ? tint.opacity(0.55) : .black.opacity(0.25),
+                radius: active ? 14 : 6,
+                y: 2
+            )
             .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.45)
+        // `.disabled` makes macOS dim the whole tile, which turns translucent
+        // over the glass panel; hit-testing alone keeps the same navy surface
+        // and still stops the action while the fan is off.
+        .allowsHitTesting(enabled)
     }
 }
 
 /// Pill used for the small "All on" style actions.
 struct PillButton: View {
     let title: String
-    var tint: Color = Palette.fan
     var enabled: Bool = true
     let action: () -> Void
 
@@ -331,10 +358,25 @@ struct StatCard: View {
                 .minimumScaleFactor(0.7)
             Text(title)
                 .font(.system(size: 10))
-                .foregroundStyle(Palette.textSecondary)
+                .foregroundStyle(Palette.text)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .card(radius: 15, padding: 12)
+        .padding(12)
+        .background {
+            // The standard card interior, same as every other surface — the
+            // accent lives in the icon only.
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(Palette.background)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(Palette.fan.opacity(0.10))
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .strokeBorder(Palette.fan.opacity(0.25), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
     }
 }
 

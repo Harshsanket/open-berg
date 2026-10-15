@@ -29,6 +29,9 @@ struct ControlPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let warning = model.quotaWarning {
+                quotaPill(warning)
+            }
             header
             VStack(alignment: .leading, spacing: 14) {
                 content
@@ -47,10 +50,22 @@ struct ControlPanelView: View {
         .onPreferenceChange(PanelHeightKey.self) { height in
             onHeightChange?(height)
         }
-        .task { await model.panelOpened() }
     }
 
     // MARK: - Header
+
+    private func quotaPill(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Palette.light)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .background(Capsule().fill(Palette.light.opacity(0.15)))
+            .overlay(Capsule().strokeBorder(Palette.light.opacity(0.5)))
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+    }
 
     private var header: some View {
         HStack(spacing: 10) {
@@ -59,11 +74,27 @@ struct ControlPanelView: View {
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                StatusLine(online: model.deviceState?.isOnline, local: model.isLocalReady)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if hasSelectedFan {
+                    StatusLine(online: model.deviceState?.isOnline, local: model.isLocalReady)
+                }
             }
             Spacer(minLength: 4)
+            if hasSelectedFan {
+                CircleButton(
+                    systemName: model.isLocalReady ? "wifi" : "wifi.slash",
+                    size: 32,
+                    tint: model.isLocalReady ? Palette.fanBright : Palette.textSecondary,
+                    filled: model.isLocalReady,
+                    glow: model.isLocalReady
+                ) {
+                    model.lanEnabled.toggle()
+                }
+                .help(lanHelp)
+            }
+
             CircleButton(systemName: "slider.horizontal.3", size: 32) {
                 model.onRequestSetup?()
             }
@@ -118,6 +149,17 @@ struct ControlPanelView: View {
                 message: "Add the API key and refresh token from Developer Mode in the Atomberg Home app.",
                 actionTitle: "Open Setup",
                 action: { model.onRequestSetup?() }
+            )
+        } else if !model.hasLoadedDevices {
+            // Nothing has been paid for yet: say so rather than claiming the
+            // account has no fan. Only the fan list is fetched here; Refresh
+            // reads state and usage separately.
+            Notice(
+                icon: "arrow.clockwise",
+                title: "Nothing loaded yet",
+                message: "Fetch the fan list first, then use Refresh for its readings. Nothing is read until you ask for it.",
+                actionTitle: "Fetch fan list",
+                action: { Task { await model.refreshDevices(); await model.refreshEverything() } }
             )
         } else if model.fans.isEmpty {
             Notice(
@@ -175,17 +217,20 @@ struct ControlPanelView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .center) {
                     Readout(value: speedText, unit: "of 6")
+                        .opacity(model.isPoweredOn ? 1 : 0.4)
                     Spacer()
                     HStack(spacing: 8) {
                         CircleButton(
                             systemName: "minus",
                             size: 32,
+                            tinted: true,
                             enabled: canNudge(-1),
                             action: { Task { await model.nudgeSpeed(by: -1) } }
                         )
                         CircleButton(
                             systemName: "plus",
                             size: 32,
+                            tinted: true,
                             enabled: canNudge(1),
                             action: { Task { await model.nudgeSpeed(by: 1) } }
                         )
@@ -201,11 +246,14 @@ struct ControlPanelView: View {
                         endPoint: .trailing
                     )
                 ) {
+                    guard model.isPoweredOn else { return }
                     let level = Int(speedValue.wrappedValue.rounded())
                     speedDraft = nil
                     Task { await model.setSpeed(level) }
                 }
                 .frame(maxWidth: .infinity)
+                .opacity(model.isPoweredOn ? 1 : 0.4)
+                .allowsHitTesting(model.isPoweredOn)
                 .help("Speed, 1 to 6")
 
                 HStack {
@@ -214,7 +262,7 @@ struct ControlPanelView: View {
                     Text("6").font(.system(size: 10)).foregroundStyle(Palette.textTertiary)
                 }
             }
-            .card(radius: 16, padding: 14)
+            .card(radius: 16, padding: 14, tint: Palette.fan)
         }
     }
 
@@ -228,7 +276,7 @@ struct ControlPanelView: View {
                    { Task { await model.setTimer(hours: nextTimerHours) } })
                 : nil,
             model.supports("sleep")
-                ? ("moon.zzz.fill", "Sleep", onOff(model.deviceState?.sleepMode == true), model.deviceState?.sleepMode == true, true,
+                ? ("moon.zzz.fill", "Sleep", onOff(model.deviceState?.sleepMode == true), model.deviceState?.sleepMode == true, model.isPoweredOn,
                    { Task { await model.setSleep(!(model.deviceState?.sleepMode ?? false)) } })
                 : nil,
             model.supports("led")
@@ -236,7 +284,7 @@ struct ControlPanelView: View {
                    { Task { await model.setLED(!(model.deviceState?.led ?? false)) } })
                 : nil,
             model.supports("rev_mode")
-                ? ("arrow.triangle.2.circlepath", "Reverse", onOff(model.deviceState?.revMode == true), model.deviceState?.revMode == true, true,
+                ? ("arrow.triangle.2.circlepath", "Reverse", onOff(model.deviceState?.revMode == true), model.deviceState?.revMode == true, model.isPoweredOn,
                    { Task { await model.setReverse(!(model.deviceState?.revMode ?? false)) } })
                 : nil,
             model.supports("buzzer_status")
@@ -276,6 +324,7 @@ struct ControlPanelView: View {
                             systemName: "minus",
                             size: 30,
                             tint: Palette.light,
+                            tinted: true,
                             enabled: canStepBrightness(-10),
                             action: { Task { await model.setBrightness((model.deviceState?.brightness ?? 50) - 10) } }
                         )
@@ -296,6 +345,7 @@ struct ControlPanelView: View {
                             systemName: "plus",
                             size: 30,
                             tint: Palette.light,
+                            tinted: true,
                             enabled: canStepBrightness(10),
                             action: { Task { await model.setBrightness((model.deviceState?.brightness ?? 50) + 10) } }
                         )
@@ -325,15 +375,15 @@ struct ControlPanelView: View {
                     }
                 }
             }
-            .card(radius: 16, padding: 14)
+            .card(radius: 16, padding: 14, tint: Palette.light)
         }
     }
 
     /// Energy and runtime as two side-by-side stat cards, not a text row.
     private var usageSection: some View {
         HStack(spacing: 8) {
-            StatCard(icon: "bolt.fill", tint: Palette.fan, title: "Energy", value: energyText)
-            StatCard(icon: "clock.fill", tint: Palette.light, title: "Runtime", value: runtimeText)
+            StatCard(icon: "bolt.fill", tint: Palette.green, title: "Energy", value: energyText)
+            StatCard(icon: "clock.fill", tint: Palette.orange, title: "Runtime", value: runtimeText)
         }
     }
 
@@ -348,7 +398,7 @@ struct ControlPanelView: View {
                         .foregroundStyle(Palette.textTertiary)
                 }
                 if model.isOnline == false {
-                    Text("The fan is offline. Commands will fail until it reconnects.")
+                    Text("The fan is offline, so commands are not sent right now.")
                         .font(.system(size: 10))
                         .foregroundStyle(Palette.light)
                         .fixedSize(horizontal: false, vertical: true)
@@ -359,10 +409,7 @@ struct ControlPanelView: View {
                 ProgressView().controlSize(.mini)
             }
             PillButton(title: "Refresh", enabled: !model.isBusy && model.isConfigured) {
-                Task {
-                    await model.refreshState()
-                    await model.refreshAnalytics()
-                }
+                Task { await model.refreshEverything() }
             }
             PillButton(title: "Quit") { NSApplication.shared.terminate(nil) }
         }
@@ -374,6 +421,25 @@ struct ControlPanelView: View {
 
     private var title: String {
         model.selectedDevice?.displayName ?? "OpenBerg"
+    }
+
+    /// With no fan known — first run, setup needed, or nothing loaded yet —
+    /// the header shows neither the status line nor the LAN button: there is
+    /// no link that either could describe, and "Online · cloud" about nothing
+    /// was exactly the kind of claim this panel should not make.
+    private var hasSelectedFan: Bool { model.selectedDevice != nil }
+
+    /// The wifi button's fill follows the live LAN link, not the preference,
+    /// so it never claims "local" while the status line says "cloud". The
+    /// tooltip says what is actually happening and what a click does.
+    private var lanHelp: String {
+        if model.isLocalReady {
+            return "Local network control is on — commands cost no API calls"
+        }
+        if model.lanEnabled {
+            return "Local network control is on, but this fan isn't reachable locally — commands use the cloud. Click to turn it off."
+        }
+        return "Turn on local network control"
     }
 
     private var speedText: String {
@@ -429,7 +495,7 @@ struct ControlPanelView: View {
     private func onOff(_ value: Bool) -> String { value ? "On" : "Off" }
 
     private func canNudge(_ delta: Int) -> Bool {
-        guard model.supports("speedDelta"), let current = model.deviceState?.speed else { return false }
+        guard model.isPoweredOn, model.supports("speedDelta"), let current = model.deviceState?.speed else { return false }
         return (1...6).contains(current + delta)
     }
 

@@ -2,9 +2,6 @@
 .build/
 dist/
 
-# Generated from assets/fan-asset.jpg by scripts/build-app.sh
-Resources/
-
 # macOS
 .DS_Store
 

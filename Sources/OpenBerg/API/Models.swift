@@ -28,10 +28,6 @@ struct AccessTokenPayload: Decodable {
 struct Device: Decodable, Identifiable, Sendable {
     let deviceID: String
     let name: String?
-    let series: String?
-    let model: String?
-    let color: String?
-    let room: String?
     let deviceType: String?
     let supportedCommands: [CommandSpec]
 
@@ -55,40 +51,28 @@ struct Device: Decodable, Identifiable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         deviceID = c.tolerantString(.deviceID) ?? ""
         name = c.tolerantString(.name)
-        series = c.tolerantString(.series)
-        model = c.tolerantString(.model)
-        color = c.tolerantString(.color)
-        room = c.tolerantString(.room)
         deviceType = c.tolerantString(.deviceType)
         supportedCommands = c.tolerantArray(.supportedCommands, as: CommandSpec.self)
     }
 
     private enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
-        case name, series, model, color, room
+        case name
         case deviceType = "device_type"
         case supportedCommands = "supported_commands"
     }
 }
 
-/// One entry of a device's `supported_commands` list.
+/// One entry of a device's `supported_commands` list. The app only needs the
+/// name; the rest of each entry is prose for humans.
 struct CommandSpec: Decodable, Sendable {
     let command: String
-    let accepts: String?
-    let requires: [String]?
-    let subKeyOf: String?
 
-    private enum CodingKeys: String, CodingKey {
-        case command, accepts, requires
-        case subKeyOf = "sub_key_of"
-    }
+    private enum CodingKeys: String, CodingKey { case command }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         command = c.tolerantString(.command) ?? ""
-        accepts = c.tolerantString(.accepts)
-        requires = c.tolerantArray(.requires, as: String.self)
-        subKeyOf = c.tolerantString(.subKeyOf)
     }
 }
 
@@ -115,7 +99,6 @@ struct FanState: Decodable, Sendable {
     // Declared `var` so a command can be reflected locally the moment it is
     // sent, before the device confirms it.
     var deviceID: String?
-    var series: String?
     var power: Bool?
     /// Reported as `last_recorded_speed` (1...6).
     var speed: Int?
@@ -123,7 +106,6 @@ struct FanState: Decodable, Sendable {
     var led: Bool?
     var isOnline: Bool?
     var timerHours: Int?
-    var timerElapsedMinutes: Int?
     /// `ts_epoch_seconds` — when the device last reported this state.
     var reportedAt: Date?
     var brightness: Int?
@@ -133,13 +115,12 @@ struct FanState: Decodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
-        case series, power
+        case power
         case speed = "last_recorded_speed"
         case sleepMode = "sleep_mode"
         case led
         case isOnline = "is_online"
         case timerHours = "timer_hours"
-        case timerElapsedMinutes = "timer_time_elapsed_mins"
         case reportedAt = "ts_epoch_seconds"
         case brightness = "last_recorded_brightness"
         case color = "last_recorded_color"
@@ -150,14 +131,12 @@ struct FanState: Decodable, Sendable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         deviceID = c.tolerantString(.deviceID)
-        series = c.tolerantString(.series)
         power = c.tolerantBool(.power)
         speed = c.tolerantInt(.speed)
         sleepMode = c.tolerantBool(.sleepMode)
         led = c.tolerantBool(.led)
         isOnline = c.tolerantBool(.isOnline)
         timerHours = c.tolerantInt(.timerHours)
-        timerElapsedMinutes = c.tolerantInt(.timerElapsedMinutes)
         brightness = c.tolerantInt(.brightness)
         color = c.tolerantString(.color)
         revMode = c.tolerantBool(.revMode)
@@ -255,12 +234,6 @@ struct AtombergError: Error, Sendable, LocalizedError {
     let message: String
 
     var errorDescription: String? { message }
-
-    /// Only these are worth retrying automatically; every other 4xx keeps
-    /// failing until the request itself changes.
-    static func isRetryable(_ status: Int) -> Bool {
-        [429, 500, 502, 503, 504].contains(status)
-    }
 
     var hint: String? {
         switch status {

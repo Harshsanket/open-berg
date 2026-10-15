@@ -1,40 +1,45 @@
 import Foundation
 
-/// Credentials live in the login keychain rather than in defaults, so the API
-/// key, refresh token and cached access token never sit in a plist.
+/// Credentials live in one login-keychain item, so a boot reads the keychain
+/// exactly once instead of once per value — fewer round trips, and only one
+/// item whose access-control list can ever ask for permission.
+///
+/// Not a secret store for anything else: no API key, refresh token or access
+/// token ever leaves the keychain for UserDefaults, files or logs.
 enum Keychain {
     private static let service = "com.openberg.OpenBerg"
+    private static let account = "credentials"
 
-    enum Account: String {
-        case apiKey
-        case refreshToken
-        case accessToken
-        case accessTokenExpiry
+    struct Credentials: Codable {
+        var apiKey: String
+        var refreshToken: String
+        var accessToken: String?
+        /// Seconds since 1970; the token minted at this moment.
+        var accessTokenExpiry: Double?
     }
 
-    static func value(for account: Account) -> String? {
+    static func load() -> Credentials? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let text = String(data: data, encoding: .utf8)
+              let data = item as? Data
         else { return nil }
-        return text
+        return try? JSONDecoder().decode(Credentials.self, from: data)
     }
 
     @discardableResult
-    static func set(_ value: String, for account: Account) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
+    static func save(_ credentials: Credentials) -> Bool {
+        guard let data = try? JSONEncoder().encode(credentials) else { return false }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: data,
@@ -49,18 +54,13 @@ enum Keychain {
         return status == errSecSuccess
     }
 
-    static func remove(_ account: Account) {
+    /// Called when the account's credentials are replaced or forgotten.
+    static func remove() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
-    }
-
-    /// Called when the account's credentials are replaced.
-    static func clearAccessToken() {
-        remove(.accessToken)
-        remove(.accessTokenExpiry)
     }
 }

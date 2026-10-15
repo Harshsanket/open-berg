@@ -66,11 +66,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Keeps the glyph's opacity and the optional speed in step with the model
-    /// without polling.
+    /// Keeps the optional speed label in step with the model without polling.
+    /// The glyph itself is constant, so it is not observed.
     private func observeModel() {
         withObservationTracking {
-            _ = model.menuBarImage
             _ = model.showSpeedInMenuBar
             _ = model.speed
             _ = model.isPoweredOn
@@ -110,6 +109,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         analytics.target = self
         menu.addItem(analytics)
 
+        let devices = NSMenuItem(title: "Fetch Fan List", action: #selector(fetchFanList), keyEquivalent: "")
+        devices.target = self
+        menu.addItem(devices)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit OpenBerg", action: #selector(quit), keyEquivalent: "q")
@@ -127,6 +130,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     @objc private func openSetup() { showSetup() }
     @objc private func refreshState() { Task { await model.refreshState() } }
     @objc private func refreshAnalytics() { Task { await model.refreshAnalytics() } }
+    @objc private func fetchFanList() { Task { await model.refreshDevices() } }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
     // MARK: - Control panel
@@ -134,7 +138,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func configurePanel() {
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // The app is dark-only: pin the appearance on the window itself
+        // rather than threading `colorScheme` through every view.
+        panel.appearance = NSAppearance(named: .darkAqua)
+        // No window shadow: on a transparent borderless panel it hugs the
+        // rounded content and reads as a black outline around the app.
+        panel.hasShadow = false
         panel.level = .popUpMenu
         panel.isMovable = false
         panel.hidesOnDeactivate = true
@@ -142,8 +151,6 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.delegate = self
 
-        // Translucent material only — the panel picks up whatever is behind
-        // it; the fixed dark palette inside keeps the look dark either way.
         var view = ControlPanelView(model: model)
         view.onHeightChange = { [weak self] height in
             MainActor.assumeIsolated {
@@ -151,12 +158,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             }
         }
         let content = view
-            .environment(\.colorScheme, .dark)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Palette.stroke)
-            }
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
         panel.contentView = NSHostingView(rootView: content)
@@ -228,18 +230,38 @@ final class PanelController: NSObject, NSWindowDelegate {
     func showSetup() {
         if setupWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 660),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "OpenBerg Setup"
             window.isReleasedWhenClosed = false
-            let setup = SetupView(model: model)
-                .environment(\.colorScheme, .dark)
+            var setup = SetupView(model: model)
+            setup.onHeightChange = { [weak window] height in
+                MainActor.assumeIsolated {
+                    guard let window else { return }
+                    // Measure the window's own content area, not
+                    // `contentView.frame`: during the first layout the view's
+                    // frame lags a pass behind, which used to double-count
+                    // AppKit's own intrinsic-size adjustment (it resizes the
+                    // window to the hosting view's fitting size) and left the
+                    // first open with a too-tall window and dead space.
+                    let content = window.contentRect(forFrameRect: window.frame).height
+                    let delta = height - content
+                    guard abs(delta) > 1 else { return }
+                    // Grow (or shrink) the window below its top edge, so the
+                    // title bar stays where it is.
+                    var frame = window.frame
+                    frame.origin.y -= delta
+                    frame.size.height += delta
+                    window.setFrame(frame, display: true)
+                }
+            }
+            let root = setup
                 .background(Palette.background)
             window.appearance = NSAppearance(named: .darkAqua)
-            window.contentView = NSHostingView(rootView: setup)
+            window.contentView = NSHostingView(rootView: root)
             window.center()
             setupWindow = window
         }
@@ -248,7 +270,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         setupWindow?.makeKeyAndOrderFront(nil)
     }
 
-    /// Opens Setup by itself when there are no credentials yet, so a new user
+/// Opens Setup by itself when there are no credentials yet, so a new user
     /// is never left hunting for where to paste them.
     func showSetupIfUnconfigured() {
         guard !model.isConfigured else { return }

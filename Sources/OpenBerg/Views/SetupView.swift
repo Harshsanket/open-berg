@@ -10,33 +10,46 @@ import SwiftUI
 struct SetupView: View {
     @Bindable var model: AppModel
 
+    /// Reports the laid-out content height so the window sizes itself to
+    /// exactly what it shows, instead of clipping or leaving dead space.
+    var onHeightChange: ((CGFloat) -> Void)?
+
+    private static let repoURL = URL(string: "https://github.com/Harshsanket/open-berg")!
+    private static let issuesURL = URL(string: "https://github.com/Harshsanket/open-berg/issues")!
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                credentials
-                environmentSection
-                if !model.fans.isEmpty { deviceSection }
-                refreshSection
-                localNetworkSection
-                endpointsSection
-            }
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 18) {
+            credentials
+            if !model.fans.isEmpty { deviceSection }
+            refreshSection
+            usageSection
+            aboutSection
+            footer
         }
-        .frame(width: 460, height: 560)
+        .padding(18)
+        .frame(width: 460, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .preference(key: SetupHeightKey.self, value: geometry.size.height)
+            }
+        )
+        .onPreferenceChange(SetupHeightKey.self) { height in
+            onHeightChange?(height)
+        }
     }
 
     // MARK: - Credentials
 
     private var credentials: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionLabel(text: "Developer credentials")
+            SectionLabel(text: "Credentials")
             Text("""
-            In the Atomberg Home app, open Settings → Developer Mode and turn it on. \
-            It shows one API key and one refresh token for this account; copy each into \
-            the matching field below. They are stored in your login keychain, never in \
-            a preferences file, log or build output.
-            """)
+                Open Atomberg Home → Settings → Developer Mode and enable it. \
+                Copy the API key and refresh token into their respective fields below. \
+                Both credentials are securely stored in your macOS Keychain.
+                """)
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -54,15 +67,19 @@ struct SetupView: View {
             )
 
             HStack(spacing: 10) {
-                Button {
-                    Task { await model.saveCredentials() }
-                } label: {
-                    Text(model.hasUnsavedCredentials ? "Save & connect" : "Reconnect")
-                        .frame(minWidth: 96)
+                // Nothing to save while the stored credentials are already in
+                // use; the button returns the moment a field is edited.
+                if !model.isConfigured || model.hasUnsavedCredentials {
+                    Button {
+                        Task { await model.saveCredentials() }
+                    } label: {
+                        Text("Save & connect")
+                            .frame(minWidth: 96)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [])
+                    .disabled(model.isBusy || model.apiKey.isEmpty || model.refreshToken.isEmpty)
                 }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(model.isBusy || model.apiKey.isEmpty || model.refreshToken.isEmpty)
 
                 if model.isConfigured {
                     Button("Forget credentials") { model.forgetCredentials() }
@@ -88,26 +105,6 @@ struct SetupView: View {
         .card(radius: 16, padding: 14)
     }
 
-    // MARK: - Environment
-
-    private var environmentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "API base")
-            Picker("", selection: $model.environment) {
-                ForEach(AtombergAPI.Environment.allCases) { environment in
-                    Text(environment.title).tag(environment)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(model.environment.baseURL.absoluteString)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
     // MARK: - Device
 
     private var deviceSection: some View {
@@ -125,13 +122,6 @@ struct SetupView: View {
             .labelsHidden()
 
             if let device = model.selectedDevice {
-                let commands = device.supportedCommands.map(\.command).sorted()
-                Text(commands.isEmpty
-                     ? "This device advertises no commands."
-                     : "Accepts: \(commands.joined(separator: ", "))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 Text("device_id \(device.deviceID)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
@@ -150,34 +140,66 @@ struct SetupView: View {
             HStack {
                 Text("Auto-refresh").font(.system(size: 12))
                 Spacer()
-                Picker("", selection: $model.autoRefreshSeconds) {
+                Picker("", selection: $model.refreshIntervalHours) {
                     Text("Manual").tag(0)
-                    Text("5 min").tag(300)
-                    Text("15 min").tag(900)
-                    Text("30 min").tag(1800)
-                    Text("1 hour").tag(3600)
+                    Text("Hourly").tag(1)
+                    Text("Every 2 hours").tag(2)
+                    Text("Every 6 hours").tag(6)
+                    Text("Every 12 hours").tag(12)
+                    Text("Every 24 hours").tag(24)
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 110)
+                .fixedSize()
             }
 
-            if model.autoRefreshSeconds > 0 {
-                let cost = CallBudget.dailyCost(forInterval: model.autoRefreshSeconds)
-                Text(cost > CallBudget.dailyLimit
-                     ? "About \(cost) calls a day, which is over the free plan's 100. Reads over the local network cost nothing, so enable that below if you pick this interval."
-                     : "About \(cost) calls a day, against a 100 call limit.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(cost > CallBudget.dailyLimit ? Palette.light : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("Refresh Status & Usage").font(.system(size: 12))
+                Spacer()
+                Button {
+                    Task { await model.refreshEverything() }
+                } label: {
+                    Text("Refresh")
+                        .frame(minWidth: 76)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isBusy || !model.isConfigured)
             }
+            Text("Fetches the latest status and usage data.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Text("Update Device list").font(.system(size: 12))
+                Spacer()
+                Button {
+                    Task { await model.refreshDevices() }
+                } label: {
+                    Text("Update")
+                        .frame(minWidth: 110)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isBusy || !model.isConfigured)
+            }
+            Text("Updates the device list. Only needed after adding or renaming a device.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle("Read the state back after every command", isOn: $model.confirmAfterCommand)
                 .font(.system(size: 12))
             Toggle("Show speed beside the menu bar icon", isOn: $model.showSpeedInMenuBar)
                 .font(.system(size: 12))
+        }
+        .card(radius: 16, padding: 14)
+    }
 
-            Divider()
+    // MARK: - API usage
+
+    private var usageSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "API usage")
 
             HStack {
                 Text("Used today").font(.system(size: 12))
@@ -193,7 +215,7 @@ struct SetupView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-            Text("The free plan allows 100 calls a day at 5 a second, resetting at 00:00 UTC. Failed calls count too.")
+            Text("The free plan allows 100 calls a day at 5 a second, resetting at 00:00 UTC.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -201,58 +223,51 @@ struct SetupView: View {
         .card(radius: 16, padding: 14)
     }
 
-    // MARK: - Local network
+    // MARK: - About
 
-    private var localNetworkSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "Local network")
-            Toggle("Control the fan over your LAN", isOn: $model.lanEnabled)
-                .font(.system(size: 12))
-            Text("Fans broadcast a beacon on UDP 5625 and accept the same command JSON on UDP 5600, so local control costs no API calls. macOS asks for permission the first time this is switched on.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "About")
 
-            if model.lanEnabled {
-                VStack(alignment: .leading, spacing: 2) {
-                    if let note = model.lanNote {
-                        Text(note).textSelection(.enabled)
-                    }
-                    Text(model.isLocalReady ? "Matched to \(model.localHost ?? "—")" : "No matching fan beacon heard yet.")
-                    if !model.lastLocalPacketPreview.isEmpty {
-                        Text("Last packet on 5600: \(model.lastLocalPacketPreview)")
-                            .textSelection(.enabled)
-                    }
-                }
-                .font(.system(size: 10))
+            Text("""
+                Made with pride in Mumbai by Harsh Sanket. \
+                Enjoying OpenBerg? Consider giving it a star on GitHub. \
+                Found a bug or have a suggestion? Open an issue on GitHub. \
+                OpenBerg is an independent, open-source project.
+                """)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Link(destination: Self.repoURL) {
+                    Label("Star on GitHub", systemImage: "star.fill")
+                }
+                .buttonStyle(.bordered)
+
+                Link(destination: Self.issuesURL) {
+                    Label("Create an issue", systemImage: "exclamationmark.bubble")
+                }
+                .buttonStyle(.bordered)
             }
+
+            Text("github.com/Harshsanket/open-berg")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
         }
         .card(radius: 16, padding: 14)
     }
 
-    // MARK: - Endpoints
-
-    private var endpointsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: "Endpoints used")
-            Text("""
-            GET  /get_access_token
-            GET  /get_list_of_devices
-            GET  /get_device_state
-            GET  /get_device_analytics
-            POST /send_command
-            """)
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-
-            Link("Atomberg IoT API reference", destination: URL(string: "https://developer.atomberg-iot.com/reference")!)
-                .font(.system(size: 11))
-        }
+    private var footer: some View {
+        Text("a \(Text("Harsh Sanket").fontWeight(.bold)) production")
+            .font(.system(size: 10))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .center)
     }
 }
+
+
 
 /// A titled credential field.
 ///
@@ -321,5 +336,12 @@ private struct CredentialField: View {
                 .help("Clear")
             }
         }
+    }
+}
+
+private struct SetupHeightKey: PreferenceKey {
+    nonisolated(unsafe) static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

@@ -19,7 +19,7 @@ final class AppModel {
     static let shared = AppModel()
 
     struct Status: Equatable {
-        enum Kind: Equatable { case idle, info, error }
+        enum Kind: Equatable { case idle, error }
         var kind: Kind = .idle
         var text: String = ""
         var hint: String?
@@ -32,24 +32,17 @@ final class AppModel {
     // Views mutate these directly; the `didSet` hooks keep UserDefaults, the
     // keychain and any running tasks in step.
 
-    var environment: AtombergAPI.Environment {
-        didSet {
-            defaults.set(environment.rawValue, forKey: Key.environment)
-            guard oldValue != environment else { return }
-            // Tokens are issued per environment, so the cache is not reusable.
-            forgetAccessToken()
-        }
-    }
-
-    var autoRefreshSeconds: Int {
-        didSet {
-            defaults.set(autoRefreshSeconds, forKey: Key.autoRefresh)
-            restartAutoRefresh()
-        }
-    }
-
     var showSpeedInMenuBar: Bool {
         didSet { defaults.set(showSpeedInMenuBar, forKey: Key.showSpeed) }
+    }
+
+    /// How often state and usage are read in the background, in hours.
+    /// 0 = never (manual only); the fan list is never read on a timer.
+    var refreshIntervalHours: Int {
+        didSet {
+            defaults.set(refreshIntervalHours, forKey: Key.refreshIntervalHours)
+            restartAutoRefresh()
+        }
     }
 
     var confirmAfterCommand: Bool {
@@ -73,7 +66,6 @@ final class AppModel {
             // The cached readings belong to the previous fan.
             deviceState = nil
             analytics = nil
-            lastAnalyticsSync = nil
         }
     }
 
@@ -91,9 +83,9 @@ final class AppModel {
     private(set) var devices: [Device] = []
     private(set) var deviceState: FanState?
     private(set) var analytics: FanAnalytics?
-    private(set) var lastSync: Date?
-    /// When `/get_device_analytics` last succeeded; gates the once-an-hour cap.
-    private(set) var lastAnalyticsSync: Date?
+    /// True once the device list has been read this session. Until then the
+    /// panel says "nothing loaded yet" rather than claiming there is no fan.
+    private(set) var hasLoadedDevices = false
     private(set) var status: Status = .idle
     private(set) var isBusy = false
     private(set) var usedToday = 0
@@ -101,10 +93,6 @@ final class AppModel {
     // MARK: - Local network
 
     private(set) var localHosts: [String: String] = [:]   // device_id -> ip
-    private(set) var lastLocalBeacon: Date?
-    private(set) var lastLocalStateAt: Date?
-    private(set) var lastLocalPacketPreview = ""
-    private(set) var lanNote: String?
 
     // MARK: - Private
 
@@ -113,10 +101,11 @@ final class AppModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let budget = CallBudget()
     @ObservationIgnored private var cachedToken: (value: String, expiry: Date)?
-    @ObservationIgnored private var autoRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var lanLink: LANLink?
     /// Stops overlapping reads from each spending a call.
     @ObservationIgnored private var isRefreshing = false
+    /// The background cadence chosen in Setup; nil when off.
+    @ObservationIgnored private var autoRefreshTask: Task<Void, Never>?
     /// Concurrent commands are allowed, so the spinner counts them.
     @ObservationIgnored private var activeRequests = 0
     /// One token mint at a time: each one costs a call.
@@ -128,38 +117,36 @@ final class AppModel {
     @ObservationIgnored var onRequestSetup: (@MainActor () -> Void)?
 
     private enum Key {
-        static let environment = "settings.environment"
-        static let autoRefresh = "settings.autoRefreshSeconds"
         static let showSpeed = "settings.showSpeedInMenuBar"
         static let confirm = "settings.confirmAfterCommand"
         static let lan = "settings.lanEnabled"
         static let deviceID = "settings.selectedDeviceID"
+        static let refreshIntervalHours = "settings.refreshIntervalHours"
     }
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
-        let rawEnvironment = defaults.string(forKey: Key.environment) ?? ""
-        environment = AtombergAPI.Environment(rawValue: rawEnvironment) ?? .production
-        autoRefreshSeconds = defaults.object(forKey: Key.autoRefresh) as? Int ?? 0
         showSpeedInMenuBar = defaults.bool(forKey: Key.showSpeed)
+        refreshIntervalHours = defaults.object(forKey: Key.refreshIntervalHours) as? Int ?? 1
         confirmAfterCommand = defaults.object(forKey: Key.confirm) as? Bool ?? true
         lanEnabled = defaults.bool(forKey: Key.lan)
         selectedDeviceID = defaults.string(forKey: Key.deviceID)
 
-        apiKey = Keychain.value(for: .apiKey) ?? ""
-        refreshToken = Keychain.value(for: .refreshToken) ?? ""
-        storedApiKey = apiKey
-        storedRefreshToken = refreshToken
-
-        if let token = Keychain.value(for: .accessToken),
-           let stamp = Keychain.value(for: .accessTokenExpiry),
-           let interval = TimeInterval(stamp) {
-            let expiry = Date(timeIntervalSince1970: interval)
+        // One keychain read for everything: credentials and the cached token.
+        if let stored = Keychain.load() {
+            apiKey = stored.apiKey
+            refreshToken = stored.refreshToken
             // Reuse the stored token for its remaining lifetime instead of
             // spending another call from the daily quota on a fresh one.
-            if expiry > Date() { cachedToken = (token, expiry) }
+            if let token = stored.accessToken,
+               let expiry = stored.accessTokenExpiry,
+               expiry > Date().timeIntervalSince1970 {
+                cachedToken = (token, Date(timeIntervalSince1970: expiry))
+            }
         }
+        storedApiKey = apiKey
+        storedRefreshToken = refreshToken
         usedToday = budget.usedToday
     }
 
@@ -196,8 +183,10 @@ final class AppModel {
 
     var isLocalReady: Bool { localHost != nil }
 
-    var budgetSummary: String {
-        "\(usedToday)/\(CallBudget.dailyLimit) calls today"
+    /// Non-nil once the day's quota is close to gone; the panel shows it as
+    /// a warning pill.
+    var quotaWarning: String? {
+        usedToday > 80 ? "⚠ \(usedToday) of \(CallBudget.dailyLimit) calls used today" : nil
     }
 
     var stateAge: String? {
@@ -209,77 +198,64 @@ final class AppModel {
 
     // MARK: - Menu bar presentation
 
-    var menuBarImage: NSImage {
-        if deviceState?.isOnline == false { return variant(0.3) }
-        if isPoweredOn { return variant(1) }
-        // Nothing reported yet: show it undimmed rather than inventing an
-        // "off" reading we do not have.
-        return deviceState == nil ? variant(1) : variant(0.5)
-    }
+    /// One glyph at full opacity. The fan's state is carried by the status
+    /// line in the panel and the optional speed label, not by fading the icon.
+    var menuBarImage: NSImage { menuBarIcon }
 
-    /// Dimmed copies are rendered once and cached — the label re-reads this on
-    /// every SwiftUI update.
-    private func variant(_ opacity: CGFloat) -> NSImage {
-        if let cached = dimmedVariants[opacity] { return cached }
-        let made = Assets.dimmed(menuBarIcon, opacity: opacity)
-        dimmedVariants[opacity] = made
-        return made
-    }
-
-    @ObservationIgnored private var dimmedVariants: [CGFloat: NSImage] = [:]
-
-    /// `Resources/` no longer supplies the menu bar glyph — the same SF Symbol
-    /// shown beside the fan name in the panel is used here, as a template
-    /// image so macOS renders it black on light bars and white on dark ones.
+    /// The same SF Symbol shown beside the fan name in the panel is used here
+    /// as a template image, so macOS renders it black on light bars and white
+    /// on dark ones.
     @ObservationIgnored private lazy var menuBarIcon: NSImage = {
-        let image = NSImage(systemSymbolName: "fan.ceiling", accessibilityDescription: "OpenBerg")
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+        let image = NSImage(systemSymbolName: "fan.ceiling.fill", accessibilityDescription: "OpenBerg")
+            .flatMap { $0.withSymbolConfiguration(config) }
+            ?? NSImage(systemSymbolName: "fanblades.fill", accessibilityDescription: "OpenBerg")
+                .flatMap { $0.withSymbolConfiguration(config) }
             ?? NSImage(systemSymbolName: "fanblades", accessibilityDescription: "OpenBerg")
-            ?? NSImage(size: NSSize(width: 20, height: 18))
+            ?? NSImage(size: NSSize(width: 18, height: 16))
         image.isTemplate = true
         return image
     }()
 
-    @ObservationIgnored private(set) lazy var heroImage: NSImage? = Assets.heroImage()
-    @ObservationIgnored private lazy var bannerLight: NSImage? = Assets.bannerImage(dark: false)
-    @ObservationIgnored private lazy var bannerDark: NSImage? = Assets.bannerImage(dark: true)
-
-    /// The header art, on the plate that suits the current appearance.
-    func bannerImage(dark: Bool) -> NSImage? { dark ? bannerDark : bannerLight }
-
     // MARK: - Lifecycle
 
-    func bootstrap() async {
+    /// Nothing is fetched on launch: state and usage are read on the schedule
+    /// the user picks in Setup (`refreshIntervalHours`), and the fan list is
+    /// only ever read when the user asks for it.
+    func bootstrap() {
         updateLAN()
         restartAutoRefresh()
-        guard isConfigured else {
-            status = Status(kind: .idle, text: "Add your Atomberg credentials to begin.")
-            return
-        }
-        await refreshDevices()
-        await refreshState()
-        await refreshAnalyticsIfStale()
     }
 
-    func panelOpened() async {
-        // Opening the panel is a deliberate act, so a refresh here is worth one
-        // call — but never more than one per 20 seconds.
-        guard isConfigured else { return }
-        if let last = lastSync, Date().timeIntervalSince(last) < 20 {
-            await refreshAnalyticsIfStale()
-            return
+    // MARK: - Scheduled reads
+
+    /// Restarts the background cadence after the interval changes. The loop
+    /// reads state and usage only — never the device list, which costs a call
+    /// the user did not ask for every time it repeats.
+    private func restartAutoRefresh() {
+        autoRefreshTask?.cancel()
+        autoRefreshTask = nil
+        guard refreshIntervalHours > 0, isConfigured else { return }
+        let period = TimeInterval(refreshIntervalHours) * 3600
+        autoRefreshTask = Task { [weak self] in
+            while true {
+                do { try await Task.sleep(for: .seconds(period)) } catch { return }
+                guard !Task.isCancelled else { return }
+                guard let self, self.isConfigured else { return }
+                // Without the fan list there is no selected device to read, so
+                // a timed read would attach to an arbitrary row.
+                guard self.hasLoadedDevices else { continue }
+                await self.refreshState()
+                await self.refreshAnalytics()
+            }
         }
-        await refreshState(silent: true)
-        await refreshAnalyticsIfStale()
     }
 
     // MARK: - Credentials
 
     func saveCredentials() async {
-        Keychain.set(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), for: .apiKey)
-        let trimmedRefresh = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        Keychain.set(trimmedRefresh, for: .refreshToken)
         apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        refreshToken = trimmedRefresh
+        refreshToken = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
         storedApiKey = apiKey
         storedRefreshToken = refreshToken
 
@@ -288,16 +264,17 @@ final class AppModel {
         devices = []
         deviceState = nil
         analytics = nil
+        hasLoadedDevices = false
         selectedDeviceID = nil
-        status = Status(kind: .idle, text: "Connecting…")
+        status = .idle
         await refreshDevices()
         await refreshState()
+        restartAutoRefresh()
     }
 
     func forgetCredentials() {
-        Keychain.remove(.apiKey)
-        Keychain.remove(.refreshToken)
-        forgetAccessToken()
+        cachedToken = nil
+        Keychain.remove()
         apiKey = ""
         refreshToken = ""
         storedApiKey = ""
@@ -305,25 +282,42 @@ final class AppModel {
         devices = []
         deviceState = nil
         analytics = nil
+        hasLoadedDevices = false
         selectedDeviceID = nil
-        status = Status(kind: .idle, text: "Credentials removed.")
+        status = .idle
+        restartAutoRefresh()
     }
 
+    /// Drops the cached access token, in memory and in the keychain item.
+    /// The credentials themselves stay put.
     private func forgetAccessToken() {
         cachedToken = nil
-        Keychain.clearAccessToken()
+        Keychain.save(Keychain.Credentials(apiKey: apiKey, refreshToken: refreshToken))
     }
 
     // MARK: - Reads
+    //
+    // The fan list is read only when the user asks for it; state and usage
+    // are additionally read on the `refreshIntervalHours` cadence.
 
     /// Switches the fan the panel is showing, then reads the new one's state.
     func selectDevice(_ id: String) async {
         guard id != selectedDeviceID else { return }
         selectedDeviceID = id
         await refreshState()
-        await refreshAnalyticsIfStale()
+        await refreshAnalytics()
     }
 
+    /// What Refresh presses read: the current state and the usage figures —
+    /// two calls. The device list is deliberately not part of it; see
+    /// `refreshDevices()`.
+    func refreshEverything() async {
+        await refreshState()
+        await refreshAnalytics()
+    }
+
+    /// Re-reads the device list — one call, only ever on an explicit press of
+    /// the "Fetch fan list" button.
     func refreshDevices() async {
         guard isConfigured else { return }
         guard !isRefreshing else { return }
@@ -332,30 +326,24 @@ final class AppModel {
         await run { api, token in
             let list = try await api.devices(accessToken: token)
             self.devices = list
+            self.hasLoadedDevices = true
             if self.selectedDeviceID == nil || !list.contains(where: { $0.id == self.selectedDeviceID }) {
                 self.selectedDeviceID = list.first(where: \.isFan)?.id ?? list.first?.id
-            }
-            if list.isEmpty {
-                self.status = Status(kind: .info, text: "No Wi-Fi devices on this account yet.")
             }
         }
     }
 
     /// `device_id=all` means one call refreshes every supported device.
-    func refreshState(silent: Bool = false) async {
+    func refreshState() async {
         guard isConfigured else { return }
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
-        await run(silent: silent) { api, token in
+        await run { api, token in
             let rows = try await api.deviceState(accessToken: token)
             let wanted = self.selectedDevice?.id
             if let row = rows.first(where: { $0.deviceID == wanted }) ?? rows.first {
                 self.deviceState = row
-            }
-            self.lastSync = Date()
-            if !silent || self.status.kind == .error {
-                self.status = Status(kind: .info, text: "State updated.")
             }
         }
     }
@@ -370,18 +358,8 @@ final class AppModel {
             let wanted = self.selectedDevice?.id
             if let row = rows.first(where: { $0.deviceID == wanted }) ?? rows.first {
                 self.analytics = row
-                self.lastAnalyticsSync = Date()
             }
         }
-    }
-
-    /// Analytics change slowly and each read costs quota, so they are fetched
-    /// at most once an hour and only when the user is actually looking —
-    /// opening the panel (or launching) reuses anything fetched within the
-    /// last hour, and nothing is fetched in the background.
-    private func refreshAnalyticsIfStale() async {
-        if let last = lastAnalyticsSync, Date().timeIntervalSince(last) < 3600 { return }
-        await refreshAnalytics()
     }
 
     // MARK: - Commands
@@ -443,8 +421,7 @@ final class AppModel {
     /// (which costs no quota) and falling back to `POST /send_command`.
     func send(
         _ command: [String: CommandValue],
-        optimistic: ((inout FanState) -> Void)? = nil,
-        silent: Bool = false
+        optimistic: ((inout FanState) -> Void)? = nil
     ) async {
         guard let device = selectedDevice else {
             status = Status(kind: .error, text: "Choose a fan first.")
@@ -452,16 +429,14 @@ final class AppModel {
         }
         guard !command.isEmpty else { return }
 
-        if var copy = deviceState, let optimistic {
-            optimistic(&copy)
-            deviceState = copy
-        }
-
+        // The LAN is free, so it is tried whenever the fan has been heard
+        // there, whatever the cloud reports.
         if let host = localHost, let payload = try? JSONEncoder().encode(command) {
-            lanLink?.send(payload, to: host)
-            if !silent {
-                status = Status(kind: .info, text: "Sent over your local network — no API call used.")
+            if var copy = deviceState, let optimistic {
+                optimistic(&copy)
+                deviceState = copy
             }
+            lanLink?.send(payload, to: host)
             return
         }
 
@@ -470,7 +445,24 @@ final class AppModel {
             return
         }
 
-        await run(silent: silent) { api, token in
+        // A fan the cloud reports offline cannot accept a command; sending
+        // anyway would spend one of the day's calls on a guaranteed failure.
+        if deviceState?.isOnline == false {
+            status = Status(
+                kind: .error,
+                text: "The fan is offline, so the command was not sent.",
+                hint: "It should accept commands again once it reconnects."
+            )
+            return
+        }
+
+        // Only now is a delivery certain enough to show it on the controls.
+        if var copy = deviceState, let optimistic {
+            optimistic(&copy)
+            deviceState = copy
+        }
+
+        await run { api, token in
             try await api.sendCommand(accessToken: token, deviceID: device.id, command: command)
         }
 
@@ -482,7 +474,7 @@ final class AppModel {
         let generation = commandGeneration
         try? await Task.sleep(for: .seconds(2))
         guard generation == commandGeneration else { return }
-        await refreshState(silent: true)
+        await refreshState()
     }
 
     // MARK: - Request plumbing
@@ -490,11 +482,21 @@ final class AppModel {
     /// Runs `body` with a valid access token, minting one replacement on a 401
     /// and never on anything else, so a bad request cannot burn quota in a loop.
     private func run(
-        silent: Bool = false,
         _ body: @escaping (AtombergAPI, String) async throws -> Void
     ) async {
         guard isConfigured else {
             status = Status(kind: .error, text: "Add your Atomberg credentials first.")
+            return
+        }
+        // Once the local tally says the day is spent, the server would only
+        // answer 429 — a failed call that still counts. Refuse instead of
+        // spending it.
+        guard budget.usedToday < CallBudget.dailyLimit else {
+            status = Status(
+                kind: .error,
+                text: "All 100 calls for today are used up.",
+                hint: "The quota resets at 00:00 UTC."
+            )
             return
         }
         activeRequests += 1
@@ -502,9 +504,16 @@ final class AppModel {
         defer {
             activeRequests -= 1
             isBusy = activeRequests > 0
+            // Failed calls spend quota too, so the tally is refreshed on every
+            // exit path, not only on success.
+            refreshBudget()
         }
 
-        let api = AtombergAPI(environment: environment, apiKey: apiKey)
+        let budget = self.budget
+        let api = AtombergAPI(
+            apiKey: apiKey,
+            recordCall: { budget.record() }
+        )
         do {
             var token = try await validToken(api)
             do {
@@ -514,7 +523,6 @@ final class AppModel {
                 token = try await mintToken(api)
                 try await body(api, token)
             }
-            refreshBudget()
         } catch {
             present(error)
         }
@@ -532,14 +540,19 @@ final class AppModel {
     }
 
     /// Each new token uses one call, so the result is reused for 24 hours.
+    /// The call itself is tallied by the transport's `recordCall`.
     private func mintToken(_ api: AtombergAPI) async throws -> String {
-        budget.record()
         let token = try await api.accessToken(refreshToken: refreshToken)
         let expiry = Date().addingTimeInterval(24 * 3600 - 300)
         cachedToken = (token, expiry)
-        Keychain.set(token, for: .accessToken)
-        Keychain.set(String(expiry.timeIntervalSince1970), for: .accessTokenExpiry)
-        refreshBudget()
+        Keychain.save(
+            Keychain.Credentials(
+                apiKey: apiKey,
+                refreshToken: refreshToken,
+                accessToken: token,
+                accessTokenExpiry: expiry.timeIntervalSince1970
+            )
+        )
         return token
     }
 
@@ -555,30 +568,6 @@ final class AppModel {
         }
     }
 
-    // MARK: - Auto refresh
-
-    private func restartAutoRefresh() {
-        autoRefreshTask?.cancel()
-        autoRefreshTask = nil
-
-        let interval = autoRefreshSeconds
-        guard interval > 0 else { return }
-        autoRefreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(interval))
-                guard !Task.isCancelled, let self else { return }
-                // When the local link is delivering state, polling the cloud
-                // would spend quota for nothing.
-                if self.isLocalReady,
-                   let last = self.lastLocalStateAt,
-                   Date().timeIntervalSince(last) < Double(max(interval, 20)) {
-                    continue
-                }
-                await self.refreshState(silent: true)
-            }
-        }
-    }
-
     // MARK: - Local network
 
     private func updateLAN() {
@@ -586,23 +575,16 @@ final class AppModel {
             lanLink?.stop()
             lanLink = nil
             localHosts = [:]
-            lastLocalBeacon = nil
-            lastLocalStateAt = nil
-            lanNote = nil
             return
         }
         guard lanLink == nil else { return }
 
-        lanNote = "Listening for fans on your local network."
         lanLink = LANLink(
             onBeacon: { [weak self] beacon in
                 Task { @MainActor in self?.register(beacon) }
             },
             onStatePacket: { [weak self] packet in
                 Task { @MainActor in self?.ingest(packet) }
-            },
-            onFailure: { [weak self] message in
-                Task { @MainActor in self?.lanNote = message }
             }
         )
         lanLink?.start()
@@ -610,26 +592,17 @@ final class AppModel {
 
     private func register(_ beacon: LANLink.Beacon) {
         localHosts[beacon.mac] = beacon.host
-        lastLocalBeacon = Date()
-        if isLocalReady {
-            lanNote = "Fan found on this network at \(localHost ?? beacon.host)."
-        }
     }
 
     /// The reference documents that a fan broadcasts its state on the local
     /// network after every change, but not the packet format. A JSON payload is
-    /// applied when it parses; anything else is kept as a diagnostic.
+    /// applied when it parses; anything else is ignored and the cloud read
+    /// stays authoritative.
     private func ingest(_ packet: Data) {
-        if let state = try? JSONDecoder().decode(FanState.self, from: packet) {
-            let wanted = selectedDevice?.id
-            if wanted == nil || state.deviceID == wanted || state.deviceID == nil {
-                deviceState = state
-                lastLocalStateAt = Date()
-                return
-            }
+        guard let state = try? JSONDecoder().decode(FanState.self, from: packet) else { return }
+        let wanted = selectedDevice?.id
+        if wanted == nil || state.deviceID == wanted || state.deviceID == nil {
+            deviceState = state
         }
-        lastLocalPacketPreview = packet.prefix(48).map { byte in
-            (byte >= 32 && byte < 127) ? String(UnicodeScalar(byte)) : "."
-        }.joined()
     }
 }

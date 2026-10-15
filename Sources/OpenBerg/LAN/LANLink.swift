@@ -25,8 +25,6 @@ final class LANLink: @unchecked Sendable {
         let mac: String
         let series: String?
         let host: String
-
-        var deviceIDGuess: String { mac }
     }
 
     enum Ports {
@@ -43,16 +41,13 @@ final class LANLink: @unchecked Sendable {
 
     private let onBeacon: @Sendable (Beacon) -> Void
     private let onStatePacket: @Sendable (Data) -> Void
-    private let onFailure: @Sendable (String) -> Void
 
     init(
         onBeacon: @escaping @Sendable (Beacon) -> Void,
-        onStatePacket: @escaping @Sendable (Data) -> Void,
-        onFailure: @escaping @Sendable (String) -> Void
+        onStatePacket: @escaping @Sendable (Data) -> Void
     ) {
         self.onBeacon = onBeacon
         self.onStatePacket = onStatePacket
-        self.onFailure = onFailure
     }
 
     deinit { stop() }
@@ -71,9 +66,8 @@ final class LANLink: @unchecked Sendable {
                 beaconSource = Self.readSource(for: beacon, queue: queue) { [weak self] in
                     self?.drain(beacon, isBeacon: true)
                 }
-            } else {
-                onFailure("Could not listen for fan beacons on port \(Ports.beacon).")
             }
+            // Failing to listen for beacons is not fatal: the cloud path stays.
             let state = Self.openSocket(port: Ports.command)
             stateFD = state
             if state >= 0 {
