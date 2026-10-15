@@ -32,6 +32,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/OpenBerg"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
+# The icon is drawn from code rather than committed as art, so the bundle's
+# only image is generated from Tools/GenerateAppIcon.swift on every build.
+ICON="$ROOT/.build/AppIcon.icns"
+swift "$ROOT/Tools/GenerateAppIcon.swift" "$ICON" >/dev/null
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 

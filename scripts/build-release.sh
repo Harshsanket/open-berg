@@ -42,6 +42,15 @@ ditto "$APP" "$STAGE/OpenBerg.app"
 ln -s /Applications "$STAGE/Applications"
 cp "$ROOT/scripts/dmg-readme.txt" "$STAGE/Read Me.txt"
 
+# The mounted volume shows the app icon too. The custom-icon flag is a BSD
+# attribute rather than content, so it is set on the staged folder before
+# the image is built; without SetFile the DMG still works, just with the
+# generic disk icon.
+cp "$ROOT/.build/AppIcon.icns" "$STAGE/.VolumeIcon.icns"
+if command -v SetFile >/dev/null 2>&1; then
+	SetFile -a C "$STAGE"
+fi
+
 echo "==> Creating $DMG"
 rm -f "$DMG"
 diskutil image create from --format UDZO --volumeName "OpenBerg" "$STAGE" "$DMG" >/dev/null
