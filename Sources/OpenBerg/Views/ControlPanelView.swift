@@ -437,7 +437,7 @@ struct ControlPanelView: View {
             return "Local network control is on — commands cost no API calls"
         }
         if model.lanEnabled {
-            return "Local network control is on, but this fan isn't reachable locally — commands use the cloud. Click to turn it off."
+            return "Listening for this fan on the local network; until it answers, commands use the cloud. Click to turn local control off."
         }
         return "Turn on local network control"
     }

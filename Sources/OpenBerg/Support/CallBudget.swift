@@ -24,12 +24,19 @@ final class CallBudget: @unchecked Sendable {
     }
 
     private static var today: String {
+        dayFormatter.string(from: Date())
+    }
+
+    /// Built once: `today` is checked on every tally read and write, and a
+    /// fresh DateFormatter per call (it configures locale, time zone and a
+    /// format) is needless work at that frequency.
+    private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
-    }
+        return formatter
+    }()
 
     /// Callers must hold `lock`.
     private func rollOverIfNeededLocked() {

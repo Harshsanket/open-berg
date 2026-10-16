@@ -20,26 +20,21 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private let model: AppModel
     private let statusItem: NSStatusItem
-    private let panel: KeyablePanel
+    /// Created on first open and released whenever the panel closes, so a
+    /// closed panel costs no window backing store and holds no SwiftUI tree.
+    private var panel: KeyablePanel?
     private var setupWindow: NSWindow?
     /// Last content height reported by the view; drives the window size.
     private var contentHeight: CGFloat = 360
+    /// The SwiftUI tree is built on first open rather than at launch.
+    private var hasBuiltPanelContent = false
 
     init(model: AppModel) {
         self.model = model
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // The height here only matters until the first layout, when
-        // `applyContentHeight` picks the real one from the view's content.
-        panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 360),
-            styleMask: [.borderless, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
         super.init()
 
         configureStatusItem()
-        configurePanel()
         model.onRequestSetup = { [weak self] in self?.showSetup() }
         observeModel()
     }
@@ -135,7 +130,16 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Control panel
 
-    private func configurePanel() {
+    private func makePanelIfNeeded() -> KeyablePanel {
+        if let panel { return panel }
+        // The height here only matters until the first layout, when
+        // `applyContentHeight` picks the real one from the view's content.
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 360),
+            styleMask: [.borderless, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
         panel.isOpaque = false
         panel.backgroundColor = .clear
         // The app is dark-only: pin the appearance on the window itself
@@ -150,6 +154,16 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.animationBehavior = .utilityWindow
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.delegate = self
+        self.panel = panel
+        return panel
+    }
+
+    /// Builds the panel's SwiftUI tree the first time it opens. The panel is
+    /// only ever seen on demand, so its views — and everything they observe —
+    /// need not exist while it is closed.
+    private func buildPanelContentIfNeeded(on panel: KeyablePanel) {
+        guard !hasBuiltPanelContent else { return }
+        hasBuiltPanelContent = true
 
         var view = ControlPanelView(model: model)
         view.onHeightChange = { [weak self] height in
@@ -165,10 +179,17 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func togglePanel() {
-        panel.isVisible ? hidePanel() : showPanel()
+        if panel?.isVisible == true {
+            hidePanel()
+        } else {
+            showPanel()
+        }
     }
 
     func showPanel() {
+        let panel = makePanelIfNeeded()
+        buildPanelContentIfNeeded(on: panel)
+        model.panelDidShow()
         applyContentHeight(contentHeight)
         positionPanel()
         // An accessory app is not frontmost by default, and a non-frontmost
@@ -179,20 +200,35 @@ final class PanelController: NSObject, NSWindowDelegate {
         // Re-check once the status item has a window, so the screen-height clamp
         // is applied to the display the item is actually on.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.panel.isVisible else { return }
+            guard let self, self.panel?.isVisible == true else { return }
             self.applyContentHeight(self.contentHeight)
             self.positionPanel()
         }
     }
 
     func hidePanel() {
+        guard let panel else { return }
+        // Drop the reference before ordering out, so the resign callback this
+        // produces cannot re-enter and run the session teardown twice.
+        self.panel = nil
+        panel.delegate = nil
         panel.orderOut(nil)
+        // Everything the panel was holding — the SwiftUI tree, the glass
+        // layers, the backing store — is released with it. The next open
+        // builds a fresh panel.
+        panel.contentView = nil
+        hasBuiltPanelContent = false
+        // Closing the panel ends its session: LAN listening and the refresh
+        // cadence both stop here. This path also runs when AppKit auto-hides
+        // the panel on deactivate, so nothing keeps running unseen.
+        model.panelDidHide()
     }
 
     /// Sizes the panel to exactly fit the content the view reports, clamped
     /// so it never grows taller than the screen it sits on.
     private func applyContentHeight(_ height: CGFloat) {
         contentHeight = height
+        guard let panel else { return }
         var fitted = max(200, height)
         let screen = statusItem.button?.window?.screen ?? NSScreen.main
         if let visible = screen?.visibleFrame {
@@ -204,6 +240,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     private func positionPanel() {
+        guard let panel else { return }
         guard let button = statusItem.button, let buttonWindow = button.window else { return }
         let size = panel.frame.size
         let anchor = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
@@ -224,19 +261,30 @@ final class PanelController: NSObject, NSWindowDelegate {
         hidePanel()
     }
 
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === setupWindow else { return }
+        model.setupDidHide()
+    }
+
     // MARK: - Setup window
+
+    /// The Setup window stops growing here and the page scrolls instead:
+    /// the full stack of sections is taller than most screens comfortably
+    /// show, and a window that always fit it ate the whole display.
+    private static let setupMaxContentHeight: CGFloat = 620
 
     /// A real, titled window. Text fields here always work, which is the point.
     func showSetup() {
         if setupWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 660),
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: Self.setupMaxContentHeight),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "OpenBerg Setup"
             window.isReleasedWhenClosed = false
+            window.delegate = self
             var setup = SetupView(model: model)
             setup.onHeightChange = { [weak window] height in
                 MainActor.assumeIsolated {
@@ -248,7 +296,10 @@ final class PanelController: NSObject, NSWindowDelegate {
                     // window to the hosting view's fitting size) and left the
                     // first open with a too-tall window and dead space.
                     let content = window.contentRect(forFrameRect: window.frame).height
-                    let delta = height - content
+                    let screen = window.screen ?? NSScreen.main
+                    let cap = min(Self.setupMaxContentHeight, (screen?.visibleFrame.height ?? 900) - 140)
+                    let target = min(max(height, 420), cap)
+                    let delta = target - content
                     guard abs(delta) > 1 else { return }
                     // Grow (or shrink) the window below its top edge, so the
                     // title bar stays where it is.
@@ -268,6 +319,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         hidePanel()
         NSApp.activate(ignoringOtherApps: true)
         setupWindow?.makeKeyAndOrderFront(nil)
+        model.setupDidShow()
     }
 
 /// Opens Setup by itself when there are no credentials yet, so a new user

@@ -23,10 +23,12 @@ enum OpenBergMain {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panels: PanelController?
+    private var model: AppModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = AppModel.shared
         let controller = PanelController(model: model)
+        self.model = model
         panels = controller
 
         Task { @MainActor in
@@ -35,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // empty panel with no obvious way to add credentials.
             controller.showSetupIfUnconfigured()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model?.flushPersist()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }

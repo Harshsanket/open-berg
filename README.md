@@ -13,10 +13,14 @@ OpenBerg lives in your menu bar. Click the fan icon and a small panel opens with
 * Light brightness and colour (warm, cool, daylight) for fans with a light.
 * Reverse mode for reversible fans.
 * Lifetime energy and runtime, read from Atomberg's own analytics.
-* Local network control whenever the fan is reachable that way. It is faster and does not use cloud calls, and the app falls back to the cloud on its own.
+* Local network control is on by default whenever the fan is reachable that way, but only after Setup has saved your credentials; the fan is matched by its device id. It is faster and does not use cloud calls, and the app falls back to the cloud on its own.
 * A menu bar icon that reflects the fan state, with the current speed beside it if you like.
+* Starts at login by default, so the menu bar icon is back after a restart. The switch to turn it off is in Setup.
+* Remembers where you left it: the last known state is restored from a local snapshot on every launch, so opening the panel never refetches what it already knows.
+* Updates itself: Setup checks GitHub when the app is started and once a month (or on demand), and can install a new version in place. This never touches the Atomberg call quota.
 * Credentials stored in the macOS keychain, never in plain files.
-* Stays inside the free plan limit of 100 cloud calls a day, with the count shown in Setup.
+* Stays inside the free plan limit of 100 cloud calls a day, with the count shown in Setup. Manual refresh is the default, and the usage totals are read at most once a day on a timer.
+* Quiet in the background: OpenBerg listens on the local network and refreshes status only while the panel is open. With the panel closed it stays idle, spending no cloud calls.
 
 Controls for features your fan does not have are simply not shown.
 
@@ -35,14 +39,14 @@ Controls for features your fan does not have are simply not shown.
 
 ![OpenBerg setup](screenshots/setup.png)
 
-On first use macOS may ask for Local Network permission. Allow it if you want local control, since that is how OpenBerg finds your fan without the cloud. Everything can be changed later from the same Setup window.
+Local network control starts once your credentials are saved: the fan is matched by the device id from your account, so it cannot be found locally before Setup. After that it is on by default, and on first use macOS may ask for Local Network permission. Allow it and OpenBerg prefers the local network; if the fan is not reachable there, it falls back to the cloud automatically. Save & connect itself spends one call to fetch your fan list, then reads the status over the local network; only when the fan does not send its status locally does it spend one more call, for the fan's state. Usage totals are never fetched by Setup — they follow your refresh setting and the Refresh button. OpenBerg also starts at login by default, so the menu bar icon survives a restart. Everything can be changed later from the same Setup window.
 
 ## Install
 
 Download from the [Releases page](https://github.com/Harshsanket/open-berg/releases):
 
-* **OpenBerg-1.0.0.dmg**: open it and drag OpenBerg into Applications.
-* **OpenBerg-1.0.0.zip**: the app bundle as a zip, if you prefer that.
+* **OpenBerg-1.1.0.dmg**: open it and drag OpenBerg into Applications.
+* **OpenBerg-1.1.0.zip**: the app bundle as a zip, if you prefer that.
 
 The app is not notarized by Apple, so the first launch is blocked by macOS. To allow it:
 

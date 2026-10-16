@@ -12,9 +12,10 @@ import Darwin
 ///   * a command can be delivered to `<device ip>:5600` as the same JSON body
 ///     `POST /send_command` would carry.
 ///
-/// This is optional and off by default — the cloud API is the documented path
-/// and stays the fallback. It exists because the free plan allows only 100
-/// calls a day, which a state-refresh loop would exhaust in minutes.
+/// This is the preferred path while the panel is open — the cloud API is the
+/// documented path and stays the fallback. It matters because the free plan
+/// allows only 100 calls a day, which a state-refresh loop would exhaust in
+/// minutes.
 ///
 /// `device_id` values are 12 hexadecimal characters, the same shape as a MAC,
 /// so a device is matched to a beacon by comparing normalised forms. If a
@@ -39,6 +40,25 @@ final class LANLink: @unchecked Sendable {
     private var stateSource: DispatchSourceRead?
     private var running = false
 
+    /// Where each fan was last heard, and when that was last passed on.
+    /// Beacons repeat about once a second; a repeat with an unchanged host is
+    /// dropped until the heartbeat interval passes, so the main actor is not
+    /// woken once a second for nothing. The heartbeat still keeps the
+    /// recorded host fresh enough to trust.
+    private struct Heard {
+        var host: String
+        var passedAt: Date
+    }
+    private var heardByMAC: [String: Heard] = [:]
+
+    /// How often an unchanged beacon is still passed on.
+    private static let beaconHeartbeat: TimeInterval = 60
+
+    /// One receive buffer reused across packets, and one command socket
+    /// opened on first use. Both are touched only on `queue`.
+    private var receiveBuffer = [UInt8](repeating: 0, count: 2048)
+    private var commandFD: Int32 = -1
+
     private let onBeacon: @Sendable (Beacon) -> Void
     private let onStatePacket: @Sendable (Data) -> Void
 
@@ -58,6 +78,7 @@ final class LANLink: @unchecked Sendable {
         queue.async { [self] in
             guard !running else { return }
             running = true
+            heardByMAC.removeAll()
             let beacon = Self.openSocket(port: Ports.beacon)
             beaconFD = beacon
             if beacon >= 0 {
@@ -87,6 +108,7 @@ final class LANLink: @unchecked Sendable {
         queue.sync { [self] in
             if beaconFD >= 0 { close(beaconFD); beaconFD = -1 }
             if stateFD >= 0 { close(stateFD); stateFD = -1 }
+            if commandFD >= 0 { close(commandFD); commandFD = -1 }
             running = false
         }
     }
@@ -94,11 +116,15 @@ final class LANLink: @unchecked Sendable {
     // MARK: Sending
 
     /// Fire-and-forget delivery of a command body to a fan on the LAN.
+    /// The socket is opened on first use and then reused; commands are rare,
+    /// but a fresh socket per tap is still a syscall pair worth avoiding.
     func send(_ payload: Data, to host: String) {
-        queue.async {
-            let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        queue.async { [self] in
+            if commandFD < 0 {
+                commandFD = socket(AF_INET, SOCK_DGRAM, 0)
+            }
+            let fd = commandFD
             guard fd >= 0 else { return }
-            defer { close(fd) }
 
             var address = sockaddr_in()
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -161,13 +187,12 @@ final class LANLink: @unchecked Sendable {
     }
 
     private func drain(_ fd: Int32, isBeacon: Bool) {
-        var buffer = [UInt8](repeating: 0, count: 2048)
         while true {
             var sender = sockaddr_in()
             var length = socklen_t(MemoryLayout<sockaddr_in>.size)
             let received = withUnsafeMutablePointer(to: &sender) { pointer -> Int in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                    recvfrom(fd, &buffer, buffer.count, 0, socketAddress, &length)
+                    recvfrom(fd, &receiveBuffer, receiveBuffer.count, 0, socketAddress, &length)
                 }
             }
             guard received > 0 else { return }
@@ -176,10 +201,16 @@ final class LANLink: @unchecked Sendable {
             var address = sender.sin_addr
             inet_ntop(AF_INET, &address, &host, socklen_t(INET_ADDRSTRLEN))
             let hostString = Self.string(host)
-            let packet = Data(buffer[0..<received])
+            let packet = Data(receiveBuffer[0..<received])
 
             if isBeacon {
                 guard let beacon = Self.parseBeacon(packet, host: hostString) else { continue }
+                let now = Date()
+                if let heard = heardByMAC[beacon.mac], heard.host == beacon.host,
+                   now.timeIntervalSince(heard.passedAt) < Self.beaconHeartbeat {
+                    continue
+                }
+                heardByMAC[beacon.mac] = Heard(host: beacon.host, passedAt: now)
                 onBeacon(beacon)
             } else {
                 onStatePacket(packet)

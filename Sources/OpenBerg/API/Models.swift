@@ -25,7 +25,11 @@ struct AccessTokenPayload: Decodable {
 // MARK: - Devices
 
 /// One entry from `GET /get_list_of_devices`.
-struct Device: Decodable, Identifiable, Sendable {
+///
+/// `Codable` beyond the API's `Decodable`: the app caches the last known
+/// list so a fresh launch shows the fan before any network call. Decoding
+/// stays lenient; encoding follows the canonical keys.
+struct Device: Codable, Identifiable, Sendable {
     let deviceID: String
     let name: String?
     let deviceType: String?
@@ -65,7 +69,7 @@ struct Device: Decodable, Identifiable, Sendable {
 
 /// One entry of a device's `supported_commands` list. The app only needs the
 /// name; the rest of each entry is prose for humans.
-struct CommandSpec: Decodable, Sendable {
+struct CommandSpec: Codable, Sendable {
     let command: String
 
     private enum CodingKeys: String, CodingKey { case command }
@@ -95,7 +99,7 @@ struct DeviceListPayload: Decodable {
 /// Fields are optional on purpose: older firmware on the same series reports
 /// fewer keys, and a key that has never been reported is missing rather than
 /// `null`.
-struct FanState: Decodable, Sendable {
+struct FanState: Codable, Sendable {
     // Declared `var` so a command can be reflected locally the moment it is
     // sent, before the device confirms it.
     var deviceID: String?
@@ -167,7 +171,7 @@ struct DeviceStatePayload: Decodable {
 ///
 /// A counter the device has never reported comes back as `null`, which is not
 /// the same thing as a real zero.
-struct FanAnalytics: Decodable, Sendable {
+struct FanAnalytics: Codable, Sendable {
     let deviceID: String?
     /// Lifetime energy in kWh.
     let powerConsumption: Double?

@@ -18,23 +18,27 @@ struct SetupView: View {
     private static let issuesURL = URL(string: "https://github.com/Harshsanket/open-berg/issues")!
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            credentials
-            if !model.fans.isEmpty { deviceSection }
-            refreshSection
-            usageSection
-            aboutSection
-            footer
-        }
-        .padding(18)
-        .frame(width: 460, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
-        .background(
-            GeometryReader { geometry in
-                Color.clear
-                    .preference(key: SetupHeightKey.self, value: geometry.size.height)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                credentials
+                if !model.fans.isEmpty { deviceSection }
+                refreshSection
+                usageSection
+                updatesSection
+                aboutSection
+                footer
             }
-        )
+            .padding(18)
+            .frame(width: 460, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                GeometryReader { geometry in
+                    Color.clear
+                        .preference(key: SetupHeightKey.self, value: geometry.size.height)
+                }
+            )
+        }
+        .frame(width: 460)
         .onPreferenceChange(SetupHeightKey.self) { height in
             onHeightChange?(height)
         }
@@ -152,6 +156,10 @@ struct SetupView: View {
                 .labelsHidden()
                 .fixedSize()
             }
+            Text("Re-reads status and usage on this schedule while the panel is open. Usage totals are read at most once a day.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack {
                 Text("Refresh Status & Usage").font(.system(size: 12))
@@ -191,6 +199,14 @@ struct SetupView: View {
                 .font(.system(size: 12))
             Toggle("Show speed beside the menu bar icon", isOn: $model.showSpeedInMenuBar)
                 .font(.system(size: 12))
+            Toggle("Start OpenBerg at login", isOn: $model.launchAtLogin)
+                .font(.system(size: 12))
+            if let note = model.loginItemNote {
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .card(radius: 16, padding: 14)
     }
@@ -223,6 +239,66 @@ struct SetupView: View {
         .card(radius: 16, padding: 14)
     }
 
+    // MARK: - Updates
+
+    private var updatesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "Updates")
+
+            HStack {
+                Text("OpenBerg \(model.updater.currentVersion)")
+                    .font(.system(size: 12))
+                Spacer()
+                switch model.updater.state {
+                case .checking, .installing:
+                    ProgressView().controlSize(.small)
+                case .available(let version):
+                    Button {
+                        Task { await model.updater.install() }
+                    } label: {
+                        Text("Update to \(version)")
+                            .frame(minWidth: 110)
+                    }
+                    .buttonStyle(.borderedProminent)
+                default:
+                    Button {
+                        Task { await model.updater.check() }
+                    } label: {
+                        Text("Check now")
+                            .frame(minWidth: 110)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            Text(updateNote)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Check for updates automatically", isOn: Bindable(model.updater).autoCheckEnabled)
+                .font(.system(size: 12))
+        }
+        .card(radius: 16, padding: 14)
+    }
+
+    private var updateNote: String {
+        switch model.updater.state {
+        case .idle:
+            return "Checks run when OpenBerg is started and once a month; installing reopens the app in place."
+        case .checking:
+            return "Checking GitHub for the latest release…"
+        case .upToDate:
+            return "You're on the latest version."
+        case .available(let version):
+            return "Version \(version) is available."
+        case .installing:
+            return "Downloading and installing — OpenBerg will relaunch."
+        case .failed(let message):
+            return message
+        }
+    }
+
     // MARK: - About
 
     private var aboutSection: some View {
@@ -230,7 +306,7 @@ struct SetupView: View {
             SectionLabel(text: "About")
 
             Text("""
-                Made with pride in Mumbai by Harsh Sanket. \
+                Made proudly in Mumbai by Harsh Sanket. \
                 Enjoying OpenBerg? Consider giving it a star on GitHub. \
                 Found a bug or have a suggestion? Open an issue on GitHub. \
                 OpenBerg is an independent, open-source project.

@@ -25,6 +25,18 @@ struct AtombergAPI: Sendable {
     /// `AppModel` injects the tally.
     var recordCall: @Sendable () -> Void = {}
 
+    /// One ephemeral session for every request. Nothing here is worth
+    /// caching: reads are already sent with a no-cache policy, so a disk
+    /// cache would only leave `Cache.db`/`HTTPStorages` files behind and map
+    /// them into the process. Ephemeral keeps response storage in memory
+    /// only, and `urlCache = nil` drops even that.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     // MARK: Requests
 
     /// The only endpoint that takes the refresh token.
@@ -118,7 +130,7 @@ struct AtombergAPI: Sendable {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await Self.session.data(for: request)
         } catch {
             // Transport failure (offline, DNS, timeout). Still a call spent.
             throw AtombergError(status: 0, message: error.localizedDescription)
