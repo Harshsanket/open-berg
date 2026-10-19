@@ -46,8 +46,8 @@ Local network control starts once your credentials are saved: the fan is matched
 
 Download from the [Releases page](https://github.com/Harshsanket/open-berg/releases):
 
-* **OpenBerg-1.1.1.dmg**: open it and drag OpenBerg into Applications.
-* **OpenBerg-1.1.1.zip**: the app bundle as a zip, if you prefer that.
+* **OpenBerg-1.2.0.dmg**: open it and drag OpenBerg into Applications.
+* **OpenBerg-1.2.0.zip**: the app bundle as a zip, if you prefer that.
 
 The app is not notarized by Apple, so the first launch is blocked by macOS. To allow it:
 
