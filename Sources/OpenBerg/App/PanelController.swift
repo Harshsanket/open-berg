@@ -218,9 +218,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         // builds a fresh panel.
         panel.contentView = nil
         hasBuiltPanelContent = false
-        // Closing the panel ends its session: LAN listening and the refresh
-        // cadence both stop here. This path also runs when AppKit auto-hides
-        // the panel on deactivate, so nothing keeps running unseen.
+        // Closing the panel ends its session: the LAN listener keeps only
+        // the background-refresh feed if the user chose it, and the refresh
+        // cadence stops either way. This path also runs when AppKit
+        // auto-hides the panel on deactivate, so nothing unseen costs calls.
         model.panelDidHide()
     }
 

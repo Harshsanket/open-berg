@@ -1,5 +1,7 @@
 import AppKit
+import CryptoKit
 import Foundation
+import Security
 
 /// Update checks against the project's GitHub releases, with a one-click
 /// self-install.
@@ -8,6 +10,17 @@ import Foundation
 /// ZIP asset downloaded over URLSession, `ditto` to unpack it, and a tiny
 /// detached shell script to swap the bundle and relaunch. None of this
 /// touches the Atomberg quota.
+///
+/// Nothing is installed on trust:
+///
+///   * the asset's SHA-256, published by GitHub on the release as
+///     `sha256:<hex>`, must match the downloaded archive; a release without
+///     a published checksum is refused (the release page is offered
+///     instead);
+///   * the unpacked bundle's code signature must validate, and where either
+///     copy is signed with a certificate, the leaf certificates must match
+///     this app's — an ad-hoc-signed copy has no identity to pin, so the
+///     checksum above is then the only cryptographic binding.
 ///
 /// When checks run (deliberately stingy):
 ///   * on a normal app launch, at most once a calendar day — a login start
@@ -55,6 +68,9 @@ final class Updater {
         let version: String
         let zip: URL
         let page: URL
+        /// GitHub's asset checksum, formatted `sha256:<hex>`; nil only for
+        /// releases old enough to predate the field.
+        let digest: String?
     }
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -132,13 +148,13 @@ final class Updater {
             let tag = payload.tagName.hasPrefix("v") ? String(payload.tagName.dropFirst()) : payload.tagName
 
             guard Self.isNewer(tag, than: currentVersion),
-                  let zip = payload.assets.first(where: { $0.name.hasSuffix(".zip") })?.browserDownloadURL
+                  let asset = payload.assets.first(where: { $0.name.hasSuffix(".zip") })
             else {
                 release = nil
                 state = .upToDate
                 return
             }
-            release = Release(version: tag, zip: zip, page: payload.htmlURL)
+            release = Release(version: tag, zip: asset.browserDownloadURL, page: payload.htmlURL, digest: asset.digest)
             state = .available(tag)
         } catch {
             state = .failed(error.localizedDescription)
@@ -153,6 +169,15 @@ final class Updater {
     func install() async {
         guard case .available = state, let release else { return }
         let target = Bundle.main.bundleURL
+
+        // Fail closed: without a published checksum there is nothing to bind
+        // the download to, so self-install is refused and the release page
+        // offered for a manual update instead.
+        guard let digest = release.digest, !digest.isEmpty else {
+            NSWorkspace.shared.open(release.page)
+            state = .failed("This release does not publish a checksum, so it cannot be verified. The release page has been opened.")
+            return
+        }
 
         guard Self.canSelfInstall(bundle: target) else {
             NSWorkspace.shared.open(release.page)
@@ -170,10 +195,13 @@ final class Updater {
             let (download, _) = try await Self.session.download(from: release.zip)
             let archive = work.appendingPathComponent("update.zip")
             try FileManager.default.moveItem(at: download, to: archive)
+
+            try Self.verifyChecksum(of: archive, expected: digest)
             try Self.runDitto(unzip: archive, into: work)
 
             let newBundle = work.appendingPathComponent("OpenBerg.app")
             try Self.validate(newBundle: newBundle, expectedVersion: release.version)
+            try Self.verifySignature(newBundle: newBundle)
             try Self.spawnSwapScript(newBundle: newBundle, target: target)
             NSApp.terminate(nil)
         } catch {
@@ -203,6 +231,82 @@ final class Updater {
                 userInfo: [NSLocalizedDescriptionKey: "Could not unpack the update."]
             )
         }
+    }
+
+    // MARK: Verification
+
+    /// Binds the downloaded archive to GitHub's published checksum for the
+    /// release. Format check first, so a malformed digest fails loudly
+    /// instead of comparing apples to nothing.
+    private static func verifyChecksum(of archive: URL, expected: String) throws {
+        func fail(_ reason: String) -> NSError {
+            NSError(domain: "OpenBerg.Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
+        guard expected.hasPrefix("sha256:") else {
+            throw fail("The release's checksum is not a SHA-256 digest.")
+        }
+        let published = String(expected.dropFirst("sha256:".count)).lowercased()
+        guard published.count == 64, published.allSatisfy(\.isHexDigit) else {
+            throw fail("The release's checksum is malformed.")
+        }
+        let actual = try sha256Hex(of: archive)
+        guard actual == published else {
+            throw fail("The downloaded update does not match the release's checksum.")
+        }
+    }
+
+    private static func sha256Hex(of url: URL) throws -> String {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var hasher = SHA256()
+        while let chunk = try file.read(upToCount: 1 << 20) {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The unpacked bundle must be a valid code object, and where this app
+    /// and the update are both certificate-signed, the update must have been
+    /// signed by this app's own certificate. Ad-hoc signatures carry no
+    /// certificates, so neither side yields a fingerprint and only the
+    /// checksum above binds the update.
+    private static func verifySignature(newBundle: URL) throws {
+        func fail(_ reason: String) -> NSError {
+            NSError(domain: "OpenBerg.Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
+        var newRef: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(newBundle as CFURL, SecCSFlags(), &newRef) == errSecSuccess,
+              let newCode = newRef
+        else {
+            throw fail("The update is not a valid app bundle.")
+        }
+        guard SecStaticCodeCheckValidity(newCode, SecCSFlags(), nil) == errSecSuccess else {
+            throw fail("The update's signature could not be validated.")
+        }
+
+        var hereRef: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, SecCSFlags(), &hereRef) == errSecSuccess,
+              let hereCode = hereRef
+        else { return }
+
+        if let here = leafFingerprint(of: hereCode), let there = leafFingerprint(of: newCode),
+           here != there {
+            throw fail("The update was not signed by this app's certificate.")
+        }
+    }
+
+    /// SHA-256 of the leaf signing certificate, which pins the identity
+    /// behind the bundle. Returns nil for ad-hoc code, which has no
+    /// certificates to fingerprint.
+    private static func leafFingerprint(of code: SecStaticCode) -> String? {
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let signingInfo = info as? [String: Any],
+              let certificates = signingInfo[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              let leaf = certificates.first
+        else { return nil }
+        let der = SecCertificateCopyData(leaf) as Data
+        return SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func validate(newBundle: URL, expectedVersion: String) throws {
@@ -270,10 +374,12 @@ final class Updater {
         struct Asset: Decodable {
             let name: String
             let browserDownloadURL: URL
+            let digest: String?
 
             private enum CodingKeys: String, CodingKey {
                 case name
                 case browserDownloadURL = "browser_download_url"
+                case digest
             }
         }
 

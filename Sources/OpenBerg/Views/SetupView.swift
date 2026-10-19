@@ -149,6 +149,31 @@ struct SetupView: View {
                     Text("Hourly").tag(1)
                     Text("Every 2 hours").tag(2)
                     Text("Every 6 hours").tag(6)
+                    Text("Every 8 hours").tag(8)
+                    Text("Every 12 hours").tag(12)
+                    Text("Every 24 hours").tag(24)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                // The rule only governs sources set to Auto; when both
+                // status and usage ride their own cadences it is unused.
+                .disabled(model.statusRefreshHours > 0 && model.usageRefreshHours > 0)
+            }
+            Text("The schedule Status and Usage follow when they are set to Auto. Greyed out once both run their own cadence instead.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Text("Status refresh").font(.system(size: 12))
+                Spacer()
+                Picker("", selection: $model.statusRefreshHours) {
+                    Text("Auto").tag(0)
+                    Text("Hourly").tag(1)
+                    Text("Every 2 hours").tag(2)
+                    Text("Every 6 hours").tag(6)
+                    Text("Every 8 hours").tag(8)
                     Text("Every 12 hours").tag(12)
                     Text("Every 24 hours").tag(24)
                 }
@@ -156,24 +181,53 @@ struct SetupView: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("Re-reads status and usage on this schedule while the panel is open. Usage totals are read at most once a day.")
+            Text("Reads the fan state on its cadence while the panel is open; skipped while the local feed is fresh.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack {
-                Text("Refresh Status & Usage").font(.system(size: 12))
+                Text("Usage refresh").font(.system(size: 12))
+                Spacer()
+                Picker("", selection: $model.usageRefreshHours) {
+                    Text("Auto").tag(0)
+                    Text("Hourly").tag(1)
+                    Text("Every 2 hours").tag(2)
+                    Text("Every 6 hours").tag(6)
+                    Text("Every 8 hours").tag(8)
+                    Text("Every 12 hours").tag(12)
+                    Text("Every 24 hours").tag(24)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text("Reads lifetime energy and runtime on its cadence; when set to Auto, at most once a day.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Text("Refresh now").font(.system(size: 12))
                 Spacer()
                 Button {
-                    Task { await model.refreshEverything() }
+                    Task { await model.refreshState() }
                 } label: {
-                    Text("Refresh")
-                        .frame(minWidth: 76)
+                    Text("Status")
+                        .frame(minWidth: 70)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.isBusy || !model.isConfigured)
+                Button {
+                    Task { await model.refreshAnalytics() }
+                } label: {
+                    Text("Usage")
+                        .frame(minWidth: 70)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isBusy || !model.isConfigured)
             }
-            Text("Fetches the latest status and usage data.")
+            Text("Two separate cloud calls: one for the state, one for the usage totals.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -197,6 +251,15 @@ struct SetupView: View {
 
             Toggle("Read the state back after every command", isOn: $model.confirmAfterCommand)
                 .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle("Refresh in the background over the local network", isOn: $model.backgroundRefresh)
+                    .font(.system(size: 12))
+                    .disabled(!model.lanEnabled)
+                Text("With the panel closed, keeps listening for your fan's broadcasts so the status and menu bar stay current. Local network only, so it costs no cloud calls; turned off (or when the fan stops being heard locally) nothing runs in the background.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Toggle("Show speed beside the menu bar icon", isOn: $model.showSpeedInMenuBar)
                 .font(.system(size: 12))
             Toggle("Start OpenBerg at login", isOn: $model.launchAtLogin)

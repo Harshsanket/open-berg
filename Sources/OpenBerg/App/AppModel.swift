@@ -36,11 +36,31 @@ final class AppModel {
         didSet { defaults.set(showSpeedInMenuBar, forKey: Key.showSpeed) }
     }
 
-    /// How often state and usage are read while the panel is open, in hours.
-    /// 0 = never (manual only); the fan list is never read on a timer.
+    /// The auto-refresh rule: how often sources set to "Auto" read, in hours.
+    /// 0 = never (manual only); the fan list is never read on a timer. When
+    /// both status and usage ride their own cadences instead, nothing
+    /// consumes this rule and Setup greys the picker out.
     var refreshIntervalHours: Int {
         didSet {
             defaults.set(refreshIntervalHours, forKey: Key.refreshIntervalHours)
+            restartAutoRefresh()
+        }
+    }
+
+    /// Status cadence in hours. 0 (the default) follows the auto-refresh
+    /// rule; any other value is the source's own fixed cadence.
+    var statusRefreshHours: Int {
+        didSet {
+            defaults.set(statusRefreshHours, forKey: Key.statusRefreshHours)
+            restartAutoRefresh()
+        }
+    }
+
+    /// Usage cadence in hours, same shape as `statusRefreshHours`. The
+    /// default is 12.
+    var usageRefreshHours: Int {
+        didSet {
+            defaults.set(usageRefreshHours, forKey: Key.usageRefreshHours)
             restartAutoRefresh()
         }
     }
@@ -52,6 +72,17 @@ final class AppModel {
     var lanEnabled: Bool {
         didSet {
             defaults.set(lanEnabled, forKey: Key.lan)
+            updateLAN()
+        }
+    }
+
+    /// While on, the LAN listener keeps running with the panel closed, so the
+    /// fan's own broadcasts keep the state current in the background. This is
+    /// the local path only — beacons and state packets cost nothing — so no
+    /// cloud call is ever made for background refresh, not even a failed one.
+    var backgroundRefresh: Bool {
+        didSet {
+            defaults.set(backgroundRefresh, forKey: Key.backgroundRefresh)
             updateLAN()
         }
     }
@@ -180,9 +211,12 @@ final class AppModel {
         static let showSpeed = "settings.showSpeedInMenuBar"
         static let confirm = "settings.confirmAfterCommand"
         static let lan = "settings.lanEnabled"
+        static let backgroundRefresh = "settings.backgroundRefresh"
         static let launchAtLogin = "settings.launchAtLogin"
         static let deviceID = "settings.selectedDeviceID"
         static let refreshIntervalHours = "settings.refreshIntervalHours"
+        static let statusRefreshHours = "settings.statusRefreshHours"
+        static let usageRefreshHours = "settings.usageRefreshHours"
         static let cachedState = "cache.state"
     }
 
@@ -191,8 +225,13 @@ final class AppModel {
 
         showSpeedInMenuBar = defaults.bool(forKey: Key.showSpeed)
         refreshIntervalHours = defaults.object(forKey: Key.refreshIntervalHours) as? Int ?? 0
+        // Status follows the auto-refresh rule; usage starts on its own 12 h
+        // cadence, as chosen when the two became independent.
+        statusRefreshHours = defaults.object(forKey: Key.statusRefreshHours) as? Int ?? 0
+        usageRefreshHours = defaults.object(forKey: Key.usageRefreshHours) as? Int ?? 12
         confirmAfterCommand = defaults.object(forKey: Key.confirm) as? Bool ?? true
         lanEnabled = defaults.object(forKey: Key.lan) as? Bool ?? true
+        backgroundRefresh = defaults.object(forKey: Key.backgroundRefresh) as? Bool ?? false
         launchAtLogin = defaults.object(forKey: Key.launchAtLogin) as? Bool ?? true
         selectedDeviceID = defaults.string(forKey: Key.deviceID)
 
@@ -320,9 +359,9 @@ final class AppModel {
         updater.checkIfDue(.session)
     }
 
-    /// Called when the panel closes. Both sockets and the cadence stop, and
-    /// the state cache is written out; nothing about the fan keeps running
-    /// in the background.
+    /// Called when the panel closes. The cadence stops and the state cache
+    /// is written out; the LAN listener only stops when "background refresh"
+    /// is off, otherwise it keeps the local feed running for free.
     func panelDidHide() {
         panelIsOpen = false
         updateLAN()
@@ -398,28 +437,60 @@ final class AppModel {
 
     // MARK: - Scheduled reads
 
-    /// (Re)starts the cadence after the interval changes or the panel opens.
-    /// Ticks read state and usage only — never the device list, which costs a
-    /// call the user did not ask for — and only while the panel is open.
+    /// (Re)starts the cadence after a cadence changes or the panel opens.
+    /// Status and usage are separate sources: each either follows the
+    /// auto-refresh rule (`refreshIntervalHours`) or rides its own fixed
+    /// number of hours, and the loop wakes only for the soonest due source
+    /// and reads exactly that source. Ticks never read the device list,
+    /// which costs a call the user did not ask for, and run only while the
+    /// panel is open.
     private func restartAutoRefresh() {
         autoRefreshTask?.cancel()
         autoRefreshTask = nil
-        guard panelIsOpen, refreshIntervalHours > 0, isConfigured else { return }
-        let period = TimeInterval(refreshIntervalHours) * 3600
+        guard panelIsOpen, isConfigured else { return }
+        let statusHours = statusRefreshHours > 0 ? statusRefreshHours : refreshIntervalHours
+        let usageHours = usageRefreshHours > 0 ? usageRefreshHours : refreshIntervalHours
+        // Usage that follows the auto-refresh rule stays capped at one read
+        // a day, so a short rule cannot multiply the calls the slow-moving
+        // lifetime figures need. A usage cadence the user fixed himself
+        // ticks on schedule.
+        let usageIsCapped = usageRefreshHours == 0
+        guard statusHours > 0 || usageHours > 0 else { return }
         autoRefreshTask = Task { [weak self] in
+            var statusDue = Date().addingTimeInterval(Double(statusHours) * 3600)
+            var usageDue = Date().addingTimeInterval(Double(usageHours) * 3600)
             while true {
-                do { try await Task.sleep(for: .seconds(period)) } catch { return }
+                var wakes: [Date] = []
+                if statusHours > 0 { wakes.append(statusDue) }
+                if usageHours > 0 { wakes.append(usageDue) }
+                guard let wake = wakes.min() else { return }
+                // A source that came due while reads were still running is
+                // serviced right away; a short sleep also yields to
+                // cancellation checks.
+                let now = Date()
+                let lead = max(wake.timeIntervalSince(now), 0.05)
+                do { try await Task.sleep(for: .seconds(lead)) } catch { return }
                 guard !Task.isCancelled else { return }
                 guard let self, self.isConfigured, self.panelIsOpen else { return }
-                // Without the fan list there is no selected device to read, so
-                // a timed read would attach to an arbitrary row.
+                // Without the fan list there is no selected device to read,
+                // so a timed read would attach to an arbitrary row.
                 guard self.hasLoadedDevices else { continue }
-                // While the LAN is feeding the state, the cloud read would
-                // only repeat it.
-                if !self.lanStateIsFresh {
-                    await self.refreshState()
+                let tick = Date()
+                if statusHours > 0, tick >= statusDue {
+                    statusDue = tick.addingTimeInterval(Double(statusHours) * 3600)
+                    // While the LAN is feeding the state, the cloud read
+                    // would only repeat it.
+                    if !self.lanStateIsFresh {
+                        await self.refreshState()
+                    }
                 }
-                await self.refreshAnalyticsIfStale()
+                if usageHours > 0, tick >= usageDue {
+                    usageDue = tick.addingTimeInterval(Double(usageHours) * 3600)
+                    let stale = self.lastAnalyticsReadAt.map { tick.timeIntervalSince($0) >= 86_400 } ?? true
+                    if !usageIsCapped || stale {
+                        await self.refreshAnalytics()
+                    }
+                }
             }
         }
     }
@@ -430,14 +501,6 @@ final class AppModel {
     private var lanStateIsFresh: Bool {
         guard lanEnabled, let heard = lanStateHeardAt else { return false }
         return Date().timeIntervalSince(heard) < Self.lanStateFreshness
-    }
-
-    /// Usage counters are lifetime figures that move slowly, so in an
-    /// automatic cadence they are read at most once a day. A manual refresh
-    /// always reads them.
-    private func refreshAnalyticsIfStale() async {
-        if let last = lastAnalyticsReadAt, Date().timeIntervalSince(last) < 86_400 { return }
-        await refreshAnalytics()
     }
 
     // MARK: - Credentials
@@ -517,9 +580,9 @@ final class AppModel {
 
     // MARK: - Reads
     //
-    // The fan list is read only when the user asks for it; state and usage
-    // are additionally read while the panel is open, on the
-    // `refreshIntervalHours` cadence.
+    // The fan list is read only when the user asks for it. State and usage
+    // additionally run on their own cadences while the panel is open; each
+    // manual button below spends exactly its one call.
 
     /// Switches the fan the panel is showing, then reads the new one's state.
     func selectDevice(_ id: String) async {
@@ -529,10 +592,10 @@ final class AppModel {
         await refreshAnalytics()
     }
 
-    /// What Refresh presses read: the current state and the usage figures —
-    /// two calls, or one when the LAN has just carried the state. The device
-    /// list is deliberately not part of it; it is fetched once at setup and
-    /// only re-read by the explicit "Update Device list" button.
+    /// What the panel's Refresh reads: the current state and the usage
+    /// figures — two calls, or one when the LAN has just carried the state.
+    /// The device list is deliberately not part of it; it is fetched once at
+    /// setup and only re-read by the explicit "Update Device list" button.
     func refreshEverything() async {
         if lanStateIsFresh {
             await refreshAnalytics()
@@ -797,16 +860,18 @@ final class AppModel {
 
     // MARK: - Local network
 
-    /// Runs the listener only once the app is configured and only while a
-    /// window (the panel or Setup) is open.
+    /// Runs the listener while a window (the panel or Setup) is open and
+    /// normally stops it when everything closes. With "background refresh"
+    /// chosen, and only while the fan is reachable on the LAN, the listener
+    /// keeps running with the panel closed so the fan's broadcasts keep the
+    /// state current; this costs no cloud calls.
     ///
     /// Configuration comes first because a fan is matched on the LAN by its
     /// `device_id`, which the beacon carries as a MAC; that id is only known
     /// from the account's device list. Before Setup there is nothing to
-    /// match, so listening would be pointless. And with everything closed it
-    /// should cost nothing at all, since beacons arrive every second.
+    /// match, so listening would be pointless.
     private func updateLAN() {
-        let shouldListen = lanEnabled && (panelIsOpen || setupIsOpen) && isConfigured
+        let shouldListen = lanEnabled && (panelIsOpen || setupIsOpen || backgroundRefresh) && isConfigured
         guard shouldListen else {
             lanLink?.stop()
             lanLink = nil
@@ -827,6 +892,12 @@ final class AppModel {
     }
 
     private func register(_ beacon: LANLink.Beacon) {
+        // Beacons arrive from any peer on the subnet, so a host is only
+        // registered for a fan whose device_id the account lists. Nothing
+        // here authenticates the broadcaster — that the protocol does not
+        // offer — but random or malicious noise can no longer create hosts
+        // that would silently absorb the selected fan's commands.
+        guard devices.contains(where: { LANLink.normalise($0.deviceID) == beacon.mac }) else { return }
         localHosts[beacon.mac] = LocalHost(address: beacon.host, seenAt: Date())
     }
 

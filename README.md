@@ -18,9 +18,10 @@ OpenBerg lives in your menu bar. Click the fan icon and a small panel opens with
 * Starts at login by default, so the menu bar icon is back after a restart. The switch to turn it off is in Setup.
 * Remembers where you left it: the last known state is restored from a local snapshot on every launch, so opening the panel never refetches what it already knows.
 * Updates itself: Setup checks GitHub when the app is started and once a month (or on demand), and can install a new version in place. This never touches the Atomberg call quota.
-* Credentials stored in the macOS keychain, never in plain files.
-* Stays inside the free plan limit of 100 cloud calls a day, with the count shown in Setup. Manual refresh is the default, and the usage totals are read at most once a day on a timer.
-* Quiet in the background: OpenBerg listens on the local network and refreshes status only while the panel is open. With the panel closed it stays idle, spending no cloud calls.
+* Credentials stored in the macOS keychain, never in plain files, and now bound to this Mac so a migrated keychain cannot carry them elsewhere.
+* Self-updates verify the downloaded release against GitHub's published SHA-256 digest, and the unpacked bundle against this app's own code signature, before anything is installed.
+* Stays inside the free plan limit of 100 cloud calls a day, with the count shown in Setup. Manual refresh is the default, and status and usage have their own cadences in Setup: status follows the auto-refresh rule (manual by default), usage reads every 12 hours, and when a source rides the shared rule, usage reads at most once a day on a timer.
+* Quiet in the background: OpenBerg listens on the local network and refreshes status only while the panel is open. With the panel closed it stays idle, spending no cloud calls. If you want live status anyway, Setup can leave local listening on in the background — that path costs no cloud calls.
 
 Controls for features your fan does not have are simply not shown.
 
@@ -45,8 +46,8 @@ Local network control starts once your credentials are saved: the fan is matched
 
 Download from the [Releases page](https://github.com/Harshsanket/open-berg/releases):
 
-* **OpenBerg-1.1.0.dmg**: open it and drag OpenBerg into Applications.
-* **OpenBerg-1.1.0.zip**: the app bundle as a zip, if you prefer that.
+* **OpenBerg-1.1.1.dmg**: open it and drag OpenBerg into Applications.
+* **OpenBerg-1.1.1.zip**: the app bundle as a zip, if you prefer that.
 
 The app is not notarized by Apple, so the first launch is blocked by macOS. To allow it:
 
